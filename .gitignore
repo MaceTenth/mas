@@ -1,0 +1,16 @@
+.venv/
+node_modules/
+__pycache__/
+*.pyc
+out/
+*.jpg
+*.pdf
+*.mp4
+*.pptx
+bench/runs/
+bench/target/
+bench/target2/
+bench/solutions/
+bench/solutions2/
+.pytest_cache/
+.DS_Store

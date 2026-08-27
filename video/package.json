@@ -1,0 +1,18 @@
+{
+  "name": "mas-explainer",
+  "private": true,
+  "scripts": {
+    "studio": "remotion studio",
+    "render": "remotion render src/index.ts Main out/mas-explainer.mp4"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.246",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "remotion": "4.0.246"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.3",
+    "typescript": "5.5.4"
+  }
+}
