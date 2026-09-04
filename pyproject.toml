@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-mas"
+version = "0.1.0"
+description = "mas — a multi-agent environment: durable board, worktree compartments, pluggable workers (Claude Code / Codex / API), verification gate, restartable orchestrator."
+requires-python = ">=3.11"
+dependencies = ["anthropic>=1.0", "rich>=13", "google-genai>=1.0"]
+
+[project.scripts]
+mas = "mas.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mas*"]
+
+[tool.setuptools.package-data]
+mas = ["demo_target/**/*", "demo_vote/**/*", "demo_vote/target/.gitignore", "demo_review/**/*", "demo_review/target/.gitignore"]

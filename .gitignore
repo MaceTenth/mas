@@ -14,3 +14,6 @@ bench/solutions/
 bench/solutions2/
 .pytest_cache/
 .DS_Store
+
+# packaging
+*.egg-info/
