@@ -112,7 +112,7 @@ const EndCard = () => {
           only N.
         </div>
         <div style={{ fontFamily: MONO, fontSize: 16, color: C.muted, marginTop: 48, ...foot }}>
-          claude_mas · six-round benchmark · Haiku 4.5 · $11.30
+          mas · six-round benchmark · Haiku 4.5 · $11.30
         </div>
       </div>
     </AbsoluteFill>

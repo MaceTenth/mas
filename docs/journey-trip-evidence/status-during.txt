@@ -1,0 +1,10 @@
+ID               ST  ATT   WORKER  TITLE                                          AGE
+flights          ·   0/3   -       Select round-trip flights TLV↔Japan            56s
+lodging          ⟳   1/3   -       Plan 10 nights of accommodation                25s
+itinerary        ·   0/3   -       Build day-by-day 10-day itinerary              56s
+transport        ⟳   1/3   -       Plan intra-Japan transportation                25s
+activities       ⟳   1/3   -       Plan activities, sights, and food              25s
+practical        ⟳   1/3   -       Compile pre-trip practical info                25s
+budget           ·   0/3   -       Consolidate and validate ≤ $6,000 budget       56s
+
+7 items · leased 4 · open 3 · attempts 4 · cost≈$0

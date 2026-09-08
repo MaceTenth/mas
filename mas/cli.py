@@ -1,7 +1,7 @@
 """mas — the CLI.
 
   mas init                         create .mas/ (board + config) in the current project
-  mas add "title" --brief ... --check "cmd:pytest tests/test_x.py" [--merge src/x.py] [--worker claude|codex|api|<harness>]
+  mas add "title" --brief ... --check "cmd:pytest tests/test_x.py" [--merge src/x.py] [--worker claude|codex|api|openai|<harness>]
                   [--depends-on a,b,'review-*'] [--deps settled] [--model sonnet] [--schema shape.json] [--brief-file f.md]
   mas fanout 8 "Review as {persona}" --fleet claude,codex --persona ... --check "schema:votes/{id}.json" --merge "votes/{id}.json"
   mas plan "goal" [--with claude|codex] [--dry-run]     decompose a goal into items
@@ -11,7 +11,7 @@
   mas status | mas show <id> | mas dashboard | mas events | mas lessons [--add "..."]
   mas unpark <id> | mas approve <id>
   mas supervise [--install-launchd]                     restart `mas run --forever` when it dies
-  mas demo list | mas demo run 1 | mas demo run 2       demonstrations (all flags baked into the demo config)
+  mas demo list | mas demo run 1 | mas demo run 5       demonstrations (all flags baked into the demo config)
   mas demo init <dir> [--demo N] [--force]              scaffold a demo without running it
 """
 from __future__ import annotations
@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -41,6 +42,7 @@ DEFAULT_CONFIG = {
     "commit_on_merge": True,
     "share_lessons": True,
     "models": {"claude": ["haiku", "sonnet"], "codex": [None], "api": ["claude-haiku-4-5-20251001", "claude-sonnet-5"],
+               "openai": ["gpt-5.4-mini-2026-03-17", "gpt-5.5-2026-04-23"],
                "gemini": ["gemini-2.5-flash", "gemini-2.5-pro"]},      # known prices; 3.5-flash works too (cost unknown → tokens only)
     "claude_allowed_tools": "Read,Edit,MultiEdit,Write,Grep,Glob,Bash(python:*),Bash(python3:*),Bash(pytest:*),Bash(npm:*),Bash(node:*),Bash(git status:*),Bash(git diff:*)",
     "claude_bare": False,
@@ -128,9 +130,9 @@ def _item_from_args(a, cfg, board, vars_: dict | None = None) -> Item:
     if getattr(a, "deps", None):
         meta["deps"] = a.deps
     worker = _subst(getattr(a, "worker", None), vars_)
-    known = {"claude", "codex", "api", "gemini", *((cfg.get("harnesses") or {}).keys())}
+    known = {"claude", "codex", "api", "gemini", "openai", *((cfg.get("harnesses") or {}).keys())}
     if worker and worker not in known:
-        raise SystemExit(f"unknown worker {worker!r} — built-in: claude, codex, api; configured: {', '.join(sorted(known - {'claude', 'codex', 'api'})) or 'none'} (mas harnesses)")
+        raise SystemExit(f"unknown worker {worker!r} — built-in: claude, codex, api, gemini, openai; configured: {', '.join(sorted(known - {'claude', 'codex', 'api', 'gemini', 'openai'})) or 'none'} (mas harnesses)")
     return Item(id=_subst(a.id, vars_) or "", title=_subst(a.title, vars_), brief=_subst(brief, vars_),
                 check=_subst(a.check, vars_) or "human", merge_paths=[_subst(m, vars_) for m in (a.merge or [])],
                 priority=a.priority, max_attempts=a.max_attempts or cfg["max_attempts"], worker_pref=worker,
@@ -175,12 +177,13 @@ def cmd_plan(a):
     if not items:
         print("planner returned no items"); return
     for it in items:
-        print(f"  {it.id}  {it.title}\n      check: {it.check}  merge: {it.merge_paths or '(changed files)'}")
+        print(f"  {it.id}  {it.title}\n      check: {it.check}  merge: {it.merge_paths or '(changed files)'}" + (f"  depends_on: {it.depends_on}" if it.depends_on else ""))
     if a.dry_run:
         print(f"\n{len(items)} items (dry run — not added)"); return
     for it in items:
         it.max_attempts = cfg["max_attempts"]; board.add(it)
-    print(f"\nadded {len(items)} items to the board")
+    board.log(None, "planned", {"goal": a.goal, "planner": a.with_, "model": a.model, "items": [it.id for it in items], "evidence": ".mas/last_plan.json"})
+    print(f"\nadded {len(items)} items to the board · plan evidence in .mas/last_plan.json")
 
 
 def cmd_import(a):
@@ -203,14 +206,16 @@ def cmd_run(a, root: Path | None = None):
             if exe and "/" not in exe and not shutil_which(exe):
                 raise SystemExit(f"harness '{k}' requested but `{exe}` is not on PATH")
             continue
-        if k not in ("claude", "codex", "api", "gemini"):
-            raise SystemExit(f"unknown worker kind: {k} — built-in: claude, codex, api, gemini; configured harnesses: {', '.join(harnesses) or 'none'} (see `mas harnesses`)")
+        if k not in ("claude", "codex", "api", "gemini", "openai"):
+            raise SystemExit(f"unknown worker kind: {k} — built-in: claude, codex, api, gemini, openai; configured harnesses: {', '.join(harnesses) or 'none'} (see `mas harnesses`)")
         if k in ("claude", "codex") and not shutil_which(k):
             raise SystemExit(f"worker '{k}' requested but `{k}` is not on PATH")
         if k == "api" and not os.environ.get("ANTHROPIC_API_KEY"):
             raise SystemExit("worker 'api' needs ANTHROPIC_API_KEY in the environment")
         if k == "gemini" and not os.environ.get("GEMINI_API_KEY"):
             raise SystemExit("worker 'gemini' needs GEMINI_API_KEY in the environment (pip install google-genai)")
+        if k == "openai" and not os.environ.get("OPENAI_API_KEY"):
+            raise SystemExit("worker 'openai' needs OPENAI_API_KEY in the environment")
     if a.max_turns: cfg["max_turns"] = a.max_turns
     if a.lease: cfg["lease_seconds"] = a.lease
     github = None
@@ -282,7 +287,7 @@ def cmd_harnesses(a):
         cfg_path.write_text(json.dumps(stored, indent=2))
         print(f"added harness '{name}' → {cfg_path}\n  {' '.join(spec['cmd'])}\n  run it:  mas run --workers {name}   or mix:  mas run --workers claude,{name}")
         return
-    print("built-in workers:   claude (claude -p)   codex (codex exec)   api (Anthropic Messages API loop)   gemini (Gemini API loop, GEMINI_API_KEY)")
+    print("built-in workers:   claude (claude -p)   codex (codex exec)   api (Anthropic Messages API loop)   gemini (Gemini API loop)   openai (Responses API loop; optional adviser)")
     print("configured harnesses:" if hs else "configured harnesses: none")
     for k, spec in hs.items():
         exe = str(spec.get("cmd", ["?"])[0]); on = "on PATH" if shutil_which(exe) else "NOT on PATH"
@@ -301,6 +306,17 @@ def _demo_run_variants(a, spec, base: Path, fleet):
     """Demo 5: each variant is its own project (board, repo, issues) under <base>/<variant>; then compare."""
     from .demo import init_demo
     variants = [v.strip() for v in (a.variants or ",".join(spec["variants"])).split(",") if v.strip()]
+    unknown = [v for v in variants if v not in spec["variants"]]
+    if unknown:
+        raise SystemExit(f"unknown {spec['name']} variant(s): {', '.join(unknown)}; choose from {', '.join(spec['variants'])}")
+    if base.exists() and any(base.iterdir()) and (base / ".mas").is_dir():
+        # `mas demo run` is explicitly a reset operation; replace an earlier non-variant demo safely.
+        shutil.rmtree(base)
+    elif base.exists():
+        allowed = {*spec["variants"], "comparison.md", "comparison.json", ".DS_Store"}
+        unexpected = [p.name for p in base.iterdir() if p.name not in allowed]
+        if unexpected:
+            raise SystemExit(f"{base} is not empty and is not a previous {spec['name']} directory; refusing to mix demos")
     base.mkdir(parents=True, exist_ok=True)
     extra = {}
     if spec.get("generate"):
@@ -321,7 +337,7 @@ def _demo_run_variants(a, spec, base: Path, fleet):
         cmd_run(ns, root=dest)
     if not spec.get("compare"):
         return
-    r = subprocess.run([sys.executable, str(spec["compare"]), str(base)], capture_output=True, text=True)
+    r = subprocess.run([sys.executable, str(spec["compare"]), str(base), *variants], capture_output=True, text=True)
     print(r.stdout or r.stderr)
     print(f"\ncomparison → {base / 'comparison.md'}")
 
@@ -376,6 +392,36 @@ def cmd_lessons(a):
         board.add_lesson(a.add); print("lesson recorded"); return
     for l in board.lessons(a.n):
         print(f"- {l['text']}")
+
+
+def cmd_edit(a):
+    """Change an item's contract in place — the fix for a wrong check, brief, dependency or worker. Logged."""
+    root = find_root(); cfg, board = load(root)
+    it = board.get(a.id)
+    if not it:
+        raise SystemExit(f"no item {a.id}")
+    changes = {}
+    if a.check is not None: changes["check"] = a.check
+    if a.brief is not None: changes["brief"] = a.brief
+    if a.brief_file: changes["brief"] = Path(a.brief_file).read_text()
+    if a.title is not None: changes["title"] = a.title
+    if a.merge is not None: changes["merge_paths"] = a.merge
+    if a.worker is not None: changes["worker_pref"] = a.worker or None
+    if a.priority is not None: changes["priority"] = a.priority
+    if a.max_attempts is not None: changes["max_attempts"] = a.max_attempts
+    if a.depends_on is not None: changes["depends_on"] = _resolve_deps(board, a.depends_on)
+    if a.model is not None:
+        it.meta["model"] = a.model or None; changes["meta"] = it.meta
+    if not changes:
+        raise SystemExit("nothing to change — pass --check/--brief/--title/--merge/--worker/--model/--priority/--max-attempts/--depends-on")
+    before = {k: getattr(it, k) for k in changes}
+    for k, v in changes.items():
+        setattr(it, k, v)
+    board.add(it)                                        # INSERT OR REPLACE keeps id, status, attempts, verdict
+    board.log(it.id, "edited", {"changed": {k: {"from": str(before[k])[:200], "to": str(v)[:200]} for k, v in changes.items()}})
+    print(f"edited {it.id}: " + ", ".join(changes))
+    if it.status in ("parked", "awaiting_human"):
+        print(f"item is {it.status} — `mas unpark {it.id}` to run it again")
 
 
 def cmd_unpark(a):
@@ -447,9 +493,21 @@ def cmd_demo_run(a):
     if spec is None:
         raise SystemExit(f"unknown demo {a.demo!r} — see `mas demo list`")
     dest = Path(a.dir or DEMO_DIR)
+    if getattr(a, "force", False) and dest.exists() and any(dest.iterdir()):
+        resolved = dest.resolve()
+        forbidden = {Path("/").resolve(), Path.home().resolve(), Path.cwd().resolve()}
+        if dest.is_symlink() or resolved in forbidden or len(resolved.parts) < 3:
+            raise SystemExit(f"refusing unsafe demo --force target: {resolved}")
+        shutil.rmtree(resolved)
+        print(f"removed existing demo directory (--force): {resolved}", flush=True)
     fleet = [k.strip() for k in a.fleet.split(",")] if getattr(a, "fleet", None) else None
     if spec.get("variants"):
         return _demo_run_variants(a, spec, dest, fleet)
+    if dest.exists() and any(dest.iterdir()) and not (dest / ".mas").is_dir():
+        alternative = dest.with_name(f"{dest.name}-{a.demo}")
+        raise SystemExit(f"{dest} exists but is not one mas project (it may be a multi-variant demo).\n"
+                         f"Preserve it: mas demo run {a.demo} --dir {alternative}\n"
+                         f"Replace it:  mas demo run {a.demo} --force   (deletes {dest})")
     force = dest.exists() and any(dest.iterdir())          # only a directory with .mas/ is ever wiped (init_demo checks)
     dest, items = init_demo(dest, force=force, demo=a.demo, base_config=DEFAULT_CONFIG, fleet=fleet)
     conf = spec["config"](sys.executable, fleet) if callable(spec["config"]) else spec["config"]
@@ -484,7 +542,7 @@ def main(argv=None):
         s.add_argument("--schema", help="JSON schema file (required keys + types) for a schema: check")
         s.add_argument("--merge", action="append", help="file allowed to land on main (repeatable)"); s.add_argument("--id")
         s.add_argument("--priority", type=int, default=0); s.add_argument("--max-attempts", type=int)
-        s.add_argument("--worker", help="claude | codex | api | any configured harness")
+        s.add_argument("--worker", help="claude | codex | api | gemini | openai | any configured harness")
         s.add_argument("--model", help="pin a model for this item (overrides the worker's tiers)")
         s.add_argument("--depends-on", help="comma list of item ids; globs allowed, e.g. 'review-*'")
         s.add_argument("--deps", choices=["done", "settled"], help="dependency policy: done (default) or settled (parked counts)")
@@ -497,7 +555,7 @@ def main(argv=None):
     s = sub.add_parser("plan", help="decompose a goal into items"); s.add_argument("goal"); s.add_argument("--with", dest="with_", default="claude", choices=["claude", "codex"])
     s.add_argument("--n", type=int, default=12); s.add_argument("--model"); s.add_argument("--dry-run", action="store_true"); s.set_defaults(fn=cmd_plan)
     s = sub.add_parser("import-issues", help="GitHub issues → items"); s.add_argument("repo"); s.add_argument("--label"); s.add_argument("--default-check", default="human"); s.set_defaults(fn=cmd_import)
-    s = sub.add_parser("run", help="run the orchestrator"); s.add_argument("--workers", help="comma list: claude,codex,api"); s.add_argument("--concurrency", type=int)
+    s = sub.add_parser("run", help="run the orchestrator"); s.add_argument("--workers", help="comma list: claude,codex,api,gemini,openai"); s.add_argument("--concurrency", type=int)
     s.add_argument("--forever", action="store_true"); s.add_argument("--max-items", type=int); s.add_argument("--max-turns", type=int); s.add_argument("--lease", type=float, help="lease seconds")
     s.add_argument("--github", help="owner/repo to mirror verdicts to")
     s.add_argument("--plain", action="store_true", help="line logs instead of the live view (auto when not a TTY)")
@@ -512,17 +570,22 @@ def main(argv=None):
     s = sub.add_parser("dashboard", help="aggregate view"); s.set_defaults(fn=cmd_dashboard)
     s = sub.add_parser("events", help="event log tail"); s.add_argument("-n", type=int, default=30); s.add_argument("--item"); s.set_defaults(fn=cmd_events)
     s = sub.add_parser("lessons", help="shared lessons"); s.add_argument("--add"); s.add_argument("-n", type=int, default=12); s.set_defaults(fn=cmd_lessons)
+    s = sub.add_parser("edit", help="change an item's contract (check, brief, deps, worker, model…) — logged")
+    s.add_argument("id"); s.add_argument("--check"); s.add_argument("--brief"); s.add_argument("--brief-file"); s.add_argument("--title")
+    s.add_argument("--merge", action="append"); s.add_argument("--worker"); s.add_argument("--model"); s.add_argument("--priority", type=int)
+    s.add_argument("--max-attempts", type=int); s.add_argument("--depends-on"); s.set_defaults(fn=cmd_edit)
     s = sub.add_parser("unpark", help="reopen a parked item"); s.add_argument("id"); s.add_argument("--note"); s.set_defaults(fn=cmd_unpark)
     s = sub.add_parser("approve", help="approve an item awaiting a human"); s.add_argument("id"); s.add_argument("--note"); s.set_defaults(fn=cmd_approve)
     s = sub.add_parser("supervise", help="keep `mas run --forever` alive"); s.add_argument("--install-launchd", action="store_true"); s.set_defaults(fn=cmd_supervise)
     d = sub.add_parser("demo", help="demonstrations: `mas demo list`, `mas demo run 1`"); ds = d.add_subparsers(dest="demo_cmd", required=True)
     dl = ds.add_parser("list", help="list demos"); dl.set_defaults(fn=cmd_demo_list)
-    dr = ds.add_parser("run", help="reset ~/mas-demo and run a demo with its baked-in config"); dr.add_argument("demo", nargs="?", default="1", help="1 | 2 | 3 | 4")
+    dr = ds.add_parser("run", help="reset ~/mas-demo and run a demo with its baked-in config"); dr.add_argument("demo", nargs="?", default="1", help="1 | 2 | 3 | 4 | 5 | 6")
     dr.add_argument("--fleet", help="demos 3/4: reviewer harnesses, e.g. claude,codex (default) or claude")
-    dr.add_argument("--variants", help="variant demos: comma list of variants to run")
+    dr.add_argument("--variants", help="demo 5: comma list from small-alone,small-direct-context,advised,strong-alone")
     dr.add_argument("--github", help="mirror every item to issues in owner/repo (labels mas, demoN-<variant>)")
     dr.add_argument("--deadline", type=int, help=argparse.SUPPRESS); dr.add_argument("--seed", type=int, help=argparse.SUPPRESS)
     dr.add_argument("--dir", help=f"project directory (default {Path.home() / 'mas-demo'})"); dr.add_argument("--plain", action="store_true")
+    dr.add_argument("--force", action="store_true", help="delete and replace --dir even when it is not a mas project")
     dr.add_argument("--quiet", action="store_true", help="plain mode: hide worker tool-call lines")
     dr.add_argument("--max-items", type=int, help=argparse.SUPPRESS); dr.set_defaults(fn=cmd_demo_run)
     di = ds.add_parser("init", help="scaffold a demo without running it"); di.add_argument("dir"); di.add_argument("--demo", default="1"); di.add_argument("--fleet")

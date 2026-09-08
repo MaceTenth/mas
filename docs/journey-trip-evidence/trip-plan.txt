@@ -1,0 +1,16 @@
+  flights  Select round-trip flights TLV↔Japan
+      check: cmd:test -f flights.md && grep -qiE 'tel aviv|TLV' flights.md && grep -qiE 'return|round[- ]?trip|open[- ]?jaw' flights.md && grep -qE '[$][0-9]' flights.md  merge: ['flights.md']
+  lodging  Plan 10 nights of accommodation
+      check: cmd:test -f lodging.md && grep -qiE 'night' lodging.md && grep -qiE 'ryokan' lodging.md && grep -qE '[$][0-9]' lodging.md  merge: ['lodging.md']
+  itinerary  Build day-by-day 10-day itinerary
+      check: cmd:for d in 1 2 3 4 5 6 7 8 9 10; do grep -qiE "day[ ]?${d}([^0-9]|$)" itinerary.md || exit 1; done  merge: ['itinerary.md']
+  transport  Plan intra-Japan transportation
+      check: cmd:test -f transport.md && grep -qiE 'JR|suica|shinkansen|rail pass' transport.md && grep -qE '[$][0-9]' transport.md  merge: ['transport.md']
+  activities  Plan activities, sights, and food
+      check: cmd:test -f activities.md && grep -qiE 'kyoto' activities.md && grep -qiE 'food|dining|meal' activities.md && grep -qE '[$][0-9]' activities.md  merge: ['activities.md']
+  practical  Compile pre-trip practical info
+      check: cmd:test -f practical.md && grep -qiE 'visa' practical.md && grep -qiE 'november|weather' practical.md  merge: ['practical.md']
+  budget  Consolidate and validate ≤ $6,000 budget
+      check: cmd:python -m pytest -q tests/test_budget.py  merge: ['budget.csv', 'tests/test_budget.py']  depends_on: ['flights', 'lodging', 'transport', 'activities']
+
+added 7 items to the board · plan evidence in .mas/last_plan.json

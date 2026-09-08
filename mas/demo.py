@@ -8,6 +8,10 @@ independent, verifiable items — the shape a swarm is for.
           one adjudicator debates the votes, a script tallies both       (mas demo run 3)
   demo 4  many eyes: a harder PR with four planted bugs across four files — does the
           union of independent reviewers beat any single one?           (mas demo run 4)
+  demo 5  advice as private context: Mini alone, Mini with direct context, strong
+          alone, and Mini with a read-only adviser, scored externally   (mas demo run 5)
+  demo 6  recovery under failure: deterministic crashes, lies, timeouts, dead leases,
+          retries, escalation, breaker, and a SQLite evidence report    (mas demo run 6)
 
 Every flag a demo needs is written into the project's .mas/config.json, so a
 plain `mas run` inside the demo directory does the right thing.
@@ -15,6 +19,7 @@ plain `mas run` inside the demo directory does the right thing.
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 import subprocess
 import sys
@@ -29,6 +34,14 @@ VOTE_TARGET = HERE / "demo_vote" / "target"
 TALLY = HERE / "demo_vote" / "tally.py"
 REVIEW_TARGET = HERE / "demo_review" / "target"
 REVIEW_TALLY = HERE / "demo_review" / "tally.py"
+ADVISOR_TARGET = HERE / "demo_advisor" / "target"
+ADVISOR_SCORE = HERE / "demo_advisor" / "score.py"
+ADVISOR_COMPARE = HERE / "demo_advisor" / "compare.py"
+ADVISOR_SMALL = "gpt-5.4-mini-2026-03-17"
+ADVISOR_STRONG = "gpt-5.5-2026-04-23"
+RECOVERY_TARGET = HERE / "demo_recovery" / "target"
+RECOVERY_WORKER = HERE / "demo_recovery" / "chaos_worker.py"
+RECOVERY_VERIFY = HERE / "demo_recovery" / "verify.py"
 DEFAULT_FLEET = ["claude", "codex"]
 
 
@@ -165,6 +178,120 @@ def review_config(py: str, fleet: list[str] | None = None, **_) -> dict:
                 "harnesses": {"tally": {"cmd": [py, str(REVIEW_TALLY), "{cwd}"], "prompt_via": "file", "summary": "stdout_tail", "activity": "lines"}}})
     return cfg
 
+
+# ---------------------------------------------------------- demo 5 · adviser
+def advisor_config(py: str, fleet: list[str] | None = None, variant: str | None = None, github: str | None = None, **_) -> dict:
+    variant = variant or "advised"
+    if variant not in {"small-alone", "small-direct-context", "strong-alone", "advised"}:
+        raise SystemExit(f"unknown demo 5 variant {variant!r}: small-alone, small-direct-context, advised, strong-alone")
+    executor = ADVISOR_STRONG if variant == "strong-alone" else ADVISOR_SMALL
+    return {
+        "workers": ["openai"], "concurrency": 1, "lease_seconds": 600, "heartbeat_seconds": 30,
+        "max_turns": 24, "attempt_timeout_seconds": 900, "check_timeout_seconds": 180,
+        "max_attempts": 1, "share_lessons": False,
+        "models": {"openai": [executor]},
+        "openai_reasoning_effort": "high" if variant == "strong-alone" else "medium",
+        "openai_advisor_model": ADVISOR_STRONG if variant == "advised" else None,
+        "openai_advisor_effort": "high", "openai_max_advice_calls": 2,
+        "openai_min_advice_calls": 1 if variant == "advised" else 0,
+        **({"openai_advisor_context_file": "demo_advisor/cerulean7.md"} if variant == "advised" else {}),
+        **({"openai_executor_context_file": "demo_advisor/cerulean7.md"} if variant == "small-direct-context" else {}),
+        "protected_paths": ["tests/"],
+        **({"github": github, "github_labels": ["mas", f"demo5-{variant}"]} if github else {}),
+    }
+
+
+def build_advisor_item(board: SQLiteBoard, cfg: dict, py: str, fleet: list[str] | None = None,
+                       variant: str | None = None, **_) -> list[Item]:
+    check = f"{shlex.quote(py)} {shlex.quote(str(ADVISOR_SCORE))} . --gate"
+    item = Item(
+        id="authorize", title="Implement the temporal multi-tenant authorization engine",
+        brief=("Read SPEC.md, src/policylog.py, and the public tests. Implement the complete contract in src/policylog.py. "
+               "This is a deliberately hard, indivisible task: nested cyclic groups, shortest membership paths, temporal "
+               "bounds, segment-aware * and ** matching, and deterministic rule selection. The external gate reports public "
+               "contract quality separately from private-profile quality. Keep the solution self-contained, do not modify "
+               "tests, and run the gate before finishing.\n\n"
+               "The Cerulean-7 conflict profile is not in the repository. If ask_advisor is available, consultation is "
+               "mandatory before the first edit: ask for the exact precedence tuple and pattern-specificity formula, naming "
+               "SPEC.md and src/policylog.py. The adviser is read-only and has private organizational context; you still own "
+               "every edit and verification step. If PRIVATE ORGANIZATIONAL CONTEXT is attached to this task, use it directly. "
+               "If neither direct context nor an adviser tool exists, implement a defensible interpretation from the public "
+               "contract without pretending to know the private profile."),
+        check=f"cmd:{check}", merge_paths=["src/policylog.py"], priority=10,
+        worker_pref="openai", max_attempts=1, meta={"model": cfg["models"]["openai"][0], "variant": variant or "advised"},
+    )
+    board.add(item)
+    return [item]
+
+
+# --------------------------------------------------------- demo 6 · recovery
+def recovery_config(py: str, fleet: list[str] | None = None, **_) -> dict:
+    command = [py, str(RECOVERY_WORKER), "--cwd", "{cwd}", "--root", "{root}", "--board", "{board}",
+               "--model", "{model}", "--prompt-file", "{prompt_file}", "--python", py, "--verifier", str(RECOVERY_VERIFY)]
+    harness = {"cmd": command, "prompt_via": "file", "summary": "stdout_tail", "activity": "lines"}
+    return {
+        "workers": ["chaos", "observer"], "concurrency": 4,
+        "lease_seconds": 2, "heartbeat_seconds": 0.4,
+        "max_turns": 8, "attempt_timeout_seconds": 4, "check_timeout_seconds": 10,
+        "backoff_base_seconds": 0.25, "max_attempts": 2,
+        "share_lessons": True,
+        "models": {"chaos": ["fast-agent", "recovery-agent"], "observer": ["evidence-reader"]},
+        "harnesses": {"chaos": harness, "observer": harness},
+    }
+
+
+def build_recovery_items(board: SQLiteBoard, cfg: dict, py: str, fleet: list[str] | None = None,
+                         dest: Path | None = None, **_) -> list[Item]:
+    """Seed one dead lease, then let a verified plan spawn the remaining chaos cases."""
+    verify = f"{shlex.quote(py)} {shlex.quote(str(RECOVERY_VERIFY))} . crash-resume"
+    crashed = Item(
+        id="crash-resume", title="Resume work abandoned by a dead orchestrator",
+        brief="Attempt 1 was interrupted by a simulated power loss. Recover in a new compartment without landing its partial output.",
+        check=f"cmd:{verify}", merge_paths=["artifacts/crash.txt"], priority=95,
+        worker_pref="chaos", max_attempts=3,
+    )
+    board.add(crashed)
+    dead_owner = "demo6-dead-orchestrator"
+    claimed = board.claim(dead_owner, 0.75, ["chaos"])
+    if claimed is None:
+        raise RuntimeError("demo 6 could not seed its dead lease")
+    if dest is None:
+        raise RuntimeError("demo 6 needs its project directory")
+    from .workspace import Workspace
+    stale = Workspace(dest).prepare("crash-resume-a1")
+    partial = stale / "artifacts" / "crash.txt"
+    partial.parent.mkdir(parents=True, exist_ok=True)
+    partial.write_text("partial-output-from-dead-worker\n")
+    board.log(crashed.id, "compartment", {"path": ".mas/work/crash-resume-a1", "branch": "mas/crash-resume-a1", "mode": "worktree"})
+    board.log(crashed.id, "dispatched", {"worker": "chaos", "model": "fast-agent", "attempt": 1,
+                                          "path": str(stale), "escalated_from": None})
+    board.log(crashed.id, "activity", {"tool": "chaos", "arg": "wrote partial output; orchestrator power lost",
+                                        "worker": "chaos", "model": "fast-agent"})
+    board.log(crashed.id, "fault_injected", {"fault": "dead orchestrator", "lease_owner": dead_owner,
+                                              "partial_work": str(partial)})
+
+    plan = Item(
+        id="plan-recovery", title="Generate the recovery work graph",
+        brief="Write PLAN.json describing the fault-injection tasks. One malformed generated entry is intentional and must be rejected by the spawner.",
+        check="schema:PLAN.json", merge_paths=["PLAN.json"], priority=100, worker_pref="chaos", max_attempts=2,
+        meta={
+            "schema": {"required": ["items"], "properties": {"items": {"type": "array"}}},
+            "spawn": {
+                "file": "PLAN.json", "key": "items", "prefix": "recover-",
+                "defaults": {"worker": "chaos", "max_attempts": 2},
+                "after": [{
+                    "id": "recovery-report", "title": "Prove recovery from SQLite evidence",
+                    "brief": "Read the board, artifacts, stale compartment, and event log; write result/recovery.md and result/recovery.json.",
+                    "check": f"cmd:{shlex.quote(py)} {shlex.quote(str(RECOVERY_VERIFY))} . final",
+                    "merge_paths": ["result/"], "worker": "observer", "priority": 1, "max_attempts": 1,
+                    "depends_on": ["crash-resume"], "meta": {"deps": "settled", "run_last": True},
+                }],
+            },
+        },
+    )
+    board.add(plan)
+    return [crashed, plan]
+
 DEMOS = {
     "1": {
         "name": "demo 1 · one fleet",
@@ -198,6 +325,26 @@ DEMOS = {
         "target": REVIEW_TARGET,
         "commit": "demo: billing-service with PR #207 under review",
         "build": build_review_items,
+    },
+    "5": {
+        "name": "demo 5 · advice as private context",
+        "tagline": "One hard authorization-engine task: Mini alone vs direct private context vs a GPT-5.5 adviser vs GPT-5.5 alone",
+        "show": "the advised executor cannot edit before consulting; the direct-context control gives Mini the same Cerulean-7 packet without an adviser; an external 50-case oracle separates public-contract and private-profile quality while recording time, tokens, cost, and per-role usage",
+        "config": advisor_config,
+        "target": ADVISOR_TARGET,
+        "commit": "demo: incomplete authorization engine awaiting public and private semantics",
+        "build": build_advisor_item,
+        "variants": ["small-alone", "small-direct-context", "advised", "strong-alone"],
+        "compare": ADVISOR_COMPARE,
+    },
+    "6": {
+        "name": "demo 6 · recovery under intentional failure",
+        "tagline": "A deterministic chaos run: dead lease, lying worker, crash, timeout, backoff, escalation, breaker, settled dependencies, and evidence from SQLite",
+        "show": "real worktrees and worker subprocesses fail on cue; heartbeats protect healthy work; gates reject false success; retries use fresh compartments and stronger tiers; one permanent fault parks while the run-last observer continues and proves every recovery pattern from the event log",
+        "config": recovery_config,
+        "target": RECOVERY_TARGET,
+        "commit": "demo: empty recovery lab before controlled failures",
+        "build": build_recovery_items,
     },
 }
 

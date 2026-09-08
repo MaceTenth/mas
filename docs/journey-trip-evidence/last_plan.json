@@ -1,0 +1,164 @@
+{
+ "goal": "Plan a 10-day trip from Israel to Japan in November for two people, budget $6,000",
+ "kind": "claude",
+ "model": null,
+ "prompt": "You are decomposing work for a multi-agent system. Split the GOAL into window-sized items that separate workers can do in parallel in isolated copies of this repository. Prefer items with no dependencies; when an item genuinely needs another item's output (a file it lands), say so in depends_on \u2014 it will start only after those items are done.\n\nFor EACH item give:\n- id: a short slug, unique in this plan (e.g. \"flights\")\n- title: short imperative\n- brief: everything a worker needs, pullable cold \u2014 files involved, what \"done\" means, constraints. Never assume the worker saw the other items.\n- check: how the orchestrator verifies it: \"cmd:<shell command that exits 0 on success>\" (e.g. a specific test file), or \"human\" if no automatic check exists.\n- merge_paths: the files this item is allowed to change (leave empty to merge whatever changed).\n- depends_on: ids of items whose landed files this item reads (usually empty).\n\nRules: aim for 8 items or fewer; every item must be verifiable; if two items would touch the same file, merge them into one; a check of \"human\" parks the item for a person to approve. Default test runner: python -m pytest -q\n\nGOAL: Plan a 10-day trip from Israel to Japan in November for two people, budget $6,000\n\nREPOSITORY CONTEXT:\n.gitignore\nREADME.md\n",
+ "raw": {
+  "items": [
+   {
+    "id": "flights",
+    "title": "Select round-trip flights TLV\u2194Japan",
+    "brief": "Research and select round-trip flights for 2 travelers from Tel Aviv (TLV) to Japan for a 10-day trip in November 2026. Evaluate both a plain round-trip via Tokyo (HND/NRT) and an open-jaw (into Tokyo, out of Osaka KIX), since the canonical route for this trip is Tokyo \u2192 Hakone/Mt Fuji \u2192 Kyoto \u2192 Osaka. Deliverable: create `flights.md` at repo root containing 2\u20133 concrete routing/carrier options with approximate November 2026 fares, layover/stopover details, and total travel time; then a recommended choice with outbound + return dates (early-to-mid November), booking notes, and total price for 2 people in USD. Target cost: \u2264 $2,300 for both travelers combined (this is the largest budget line of a $6,000 all-in trip). Must reference Tel Aviv/TLV, mention the return/round-trip (or open-jaw) leg, and include at least one dollar amount (e.g. $2,150). Constraint: research/planning document only \u2014 no real booking. One file only: flights.md.",
+    "check": "cmd:test -f flights.md && grep -qiE 'tel aviv|TLV' flights.md && grep -qiE 'return|round[- ]?trip|open[- ]?jaw' flights.md && grep -qE '[$][0-9]' flights.md",
+    "merge_paths": [
+     "flights.md"
+    ],
+    "depends_on": [],
+    "priority": 1
+   },
+   {
+    "id": "lodging",
+    "title": "Plan 10 nights of accommodation",
+    "brief": "Plan accommodation for 2 travelers for 10 nights in Japan (November 2026) along this fixed route: Tokyo (3 nights), Hakone/Mt Fuji area (1 night), Kyoto (3 nights), Osaka (2\u20133 nights). Deliverable: create `lodging.md` at repo root listing, per stay/city: neighborhood, 1\u20132 concrete hotel/ryokan/hostel suggestions with nightly price for a double room, number of nights, and subtotal. Include one traditional ryokan night near Hakone/Fuji (onsen). End with a grand total in USD for all 10 nights. Target: \u2264 $1,300 total for the two travelers combined (\u2248 $130/night). Use 'night' terminology and include per-night dollar amounts (e.g. $120/night). Constraint: planning document only. One file only: lodging.md.",
+    "check": "cmd:test -f lodging.md && grep -qiE 'night' lodging.md && grep -qiE 'ryokan' lodging.md && grep -qE '[$][0-9]' lodging.md",
+    "merge_paths": [
+     "lodging.md"
+    ],
+    "depends_on": [],
+    "priority": 2
+   },
+   {
+    "id": "itinerary",
+    "title": "Build day-by-day 10-day itinerary",
+    "brief": "Build a day-by-day master itinerary for a 10-day Japan trip in November 2026 for 2 travelers, following this route: Days 1\u20134 Tokyo (including one day trip), Day 5 Hakone/Mt Fuji, Days 6\u20138 Kyoto (with an optional Nara side trip), Days 9\u201310 Osaka plus departure. Deliverable: create `itinerary.md` at repo root with a clearly labeled heading for each day from 'Day 1' through 'Day 10'. Each day must list morning/afternoon/evening plans, the city/base for that night, and any inter-city transit. Keep routing consistent with Tokyo-in / Osaka-out (or round-trip Tokyo). Lean into November highlights (peak autumn foliage / koyo). Constraint: planning document only. One file only: itinerary.md. Every label 'Day 1' \u2026 'Day 10' must appear as a heading.",
+    "check": "cmd:for d in 1 2 3 4 5 6 7 8 9 10; do grep -qiE \"day[ ]?${d}([^0-9]|$)\" itinerary.md || exit 1; done",
+    "merge_paths": [
+     "itinerary.md"
+    ],
+    "depends_on": [],
+    "priority": 2
+   },
+   {
+    "id": "transport",
+    "title": "Plan intra-Japan transportation",
+    "brief": "Plan transportation inside Japan for 2 travelers over a 10-day November 2026 trip on this route: Tokyo \u2192 Hakone/Mt Fuji \u2192 Kyoto \u2192 Osaka \u2192 return to a Tokyo or Osaka airport. Deliverable: create `transport.md` at repo root covering: airport transfers; whether a 7-day Japan Rail Pass (\u2248 \u00a550,000 / ~$335 per person) is worth it versus point-to-point shinkansen tickets (show a rough total comparison); Suica/PASMO IC cards for local metro/bus; the Hakone leg (Hakone Free Pass or Romancecar); and a recommended plan with per-person and combined USD totals. Target: \u2264 $700 combined for the two travelers. Must mention JR/Suica/shinkansen/rail pass and include dollar amounts. Constraint: planning document only. One file only: transport.md.",
+    "check": "cmd:test -f transport.md && grep -qiE 'JR|suica|shinkansen|rail pass' transport.md && grep -qE '[$][0-9]' transport.md",
+    "merge_paths": [
+     "transport.md"
+    ],
+    "depends_on": [],
+    "priority": 3
+   },
+   {
+    "id": "activities",
+    "title": "Plan activities, sights, and food",
+    "brief": "Plan activities, sightseeing, and food for 2 travelers over a 10-day November 2026 Japan trip on this route: Tokyo (3\u20134 days), Hakone/Mt Fuji (1 day), Kyoto (3 days), Osaka (2 days). Deliverable: create `activities.md` at repo root with, per city: top attractions/experiences (with entry fees where relevant); items needing advance reservation (e.g. teamLab, Ghibli Museum / Ghibli Park, sumo, tea ceremony); autumn-foliage highlights (November is peak koyo season); and a realistic daily food budget (~$50\u201370 per person per day, noting must-try dishes). End with an estimated activities + food total in USD for both travelers. Target: \u2264 $1,400 combined. Must mention Kyoto, reference food/dining, and include dollar amounts. Constraint: planning document only. One file only: activities.md.",
+    "check": "cmd:test -f activities.md && grep -qiE 'kyoto' activities.md && grep -qiE 'food|dining|meal' activities.md && grep -qE '[$][0-9]' activities.md",
+    "merge_paths": [
+     "activities.md"
+    ],
+    "depends_on": [],
+    "priority": 3
+   },
+   {
+    "id": "practical",
+    "title": "Compile pre-trip practical info",
+    "brief": "Compile practical pre-trip information for 2 travelers holding Israeli passports going to Japan for 10 days in November 2026. Deliverable: create `practical.md` at repo root covering: entry requirements (Israeli passport holders receive visa-free tourist entry to Japan for stays up to 90 days \u2014 note the passport-validity recommendation and Visit Japan Web pre-registration); November weather by region (Tokyo/Kyoto/Osaka roughly 10\u201318\u00b0C, autumn foliage) and a packing list; connectivity (eSIM vs pocket Wi-Fi with rough costs); currency, cash culture, and IC cards; travel insurance; key etiquette; and useful apps. Constraint: planning document only. One file only: practical.md. Must mention 'visa' and November/weather.",
+    "check": "cmd:test -f practical.md && grep -qiE 'visa' practical.md && grep -qiE 'november|weather' practical.md",
+    "merge_paths": [
+     "practical.md"
+    ],
+    "depends_on": [],
+    "priority": 4
+   },
+   {
+    "id": "budget",
+    "title": "Consolidate and validate \u2264 $6,000 budget",
+    "brief": "Consolidate the full trip budget for 2 travelers (10 days, Japan, November 2026) and prove it fits within $6,000 USD total. Read the cost figures already landed in `flights.md`, `lodging.md`, `transport.md`, and `activities.md` \u2014 these files exist in the repo when this item runs. Deliverables: (1) create `budget.csv` at repo root with header line `category,item,cost_usd` and one row per cost line; costs are USD numbers for BOTH travelers combined; use at minimum these category values: flights, accommodation, transport, activities, food, misc. Include a small contingency/misc line so the total lands just under $6,000. (2) create `tests/test_budget.py`, a pytest test that loads budget.csv, sums the cost_usd column, asserts the total is > 0 and <= 6000, and asserts at least one row exists for each of the categories flights, accommodation, transport, and activities. Constraint: only create/modify budget.csv and tests/test_budget.py \u2014 do not edit the source planning docs.",
+    "check": "cmd:python -m pytest -q tests/test_budget.py",
+    "merge_paths": [
+     "budget.csv",
+     "tests/test_budget.py"
+    ],
+    "depends_on": [
+     "flights",
+     "lodging",
+     "transport",
+     "activities"
+    ],
+    "priority": 5
+   }
+  ]
+ },
+ "items": [
+  {
+   "id": "flights",
+   "title": "Select round-trip flights TLV\u2194Japan",
+   "check": "cmd:test -f flights.md && grep -qiE 'tel aviv|TLV' flights.md && grep -qiE 'return|round[- ]?trip|open[- ]?jaw' flights.md && grep -qE '[$][0-9]' flights.md",
+   "merge_paths": [
+    "flights.md"
+   ],
+   "depends_on": []
+  },
+  {
+   "id": "lodging",
+   "title": "Plan 10 nights of accommodation",
+   "check": "cmd:test -f lodging.md && grep -qiE 'night' lodging.md && grep -qiE 'ryokan' lodging.md && grep -qE '[$][0-9]' lodging.md",
+   "merge_paths": [
+    "lodging.md"
+   ],
+   "depends_on": []
+  },
+  {
+   "id": "itinerary",
+   "title": "Build day-by-day 10-day itinerary",
+   "check": "cmd:for d in 1 2 3 4 5 6 7 8 9 10; do grep -qiE \"day[ ]?${d}([^0-9]|$)\" itinerary.md || exit 1; done",
+   "merge_paths": [
+    "itinerary.md"
+   ],
+   "depends_on": []
+  },
+  {
+   "id": "transport",
+   "title": "Plan intra-Japan transportation",
+   "check": "cmd:test -f transport.md && grep -qiE 'JR|suica|shinkansen|rail pass' transport.md && grep -qE '[$][0-9]' transport.md",
+   "merge_paths": [
+    "transport.md"
+   ],
+   "depends_on": []
+  },
+  {
+   "id": "activities",
+   "title": "Plan activities, sights, and food",
+   "check": "cmd:test -f activities.md && grep -qiE 'kyoto' activities.md && grep -qiE 'food|dining|meal' activities.md && grep -qE '[$][0-9]' activities.md",
+   "merge_paths": [
+    "activities.md"
+   ],
+   "depends_on": []
+  },
+  {
+   "id": "practical",
+   "title": "Compile pre-trip practical info",
+   "check": "cmd:test -f practical.md && grep -qiE 'visa' practical.md && grep -qiE 'november|weather' practical.md",
+   "merge_paths": [
+    "practical.md"
+   ],
+   "depends_on": []
+  },
+  {
+   "id": "budget",
+   "title": "Consolidate and validate \u2264 $6,000 budget",
+   "check": "cmd:python -m pytest -q tests/test_budget.py",
+   "merge_paths": [
+    "budget.csv",
+    "tests/test_budget.py"
+   ],
+   "depends_on": [
+    "flights",
+    "lodging",
+    "transport",
+    "activities"
+   ]
+  }
+ ]
+}

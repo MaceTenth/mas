@@ -1562,4 +1562,4 @@ casePage({
   s.addNotes("End on the two lines and stop talking. Expected questions: 'so should I never build a swarm?' — build the environment always; raise N at the clock, the window, and failure. 'What about tasks with no oracle?' — gate the actions, sample the words, vote across independent workers, escalate the irreversible. 'Isn't this just distributed systems?' — yes. That is the point.");
 }
 
-pres.writeFile({ fileName: "/Users/shimonmoyal/claude_mas/lecture/lecture.pptx" }).then(() => console.log("written"));
+pres.writeFile({ fileName: require("path").join(__dirname, "lecture.pptx") }).then(() => console.log("written"));

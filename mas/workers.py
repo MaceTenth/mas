@@ -4,6 +4,7 @@
   codex   → `codex exec --sandbox workspace-write --json` (OpenAI Codex CLI ≥ 0.150)
   api     → a minimal tool loop on the Anthropic Messages API (no harness needed)
   gemini  → the same tool loop on the Gemini API (google-genai; GEMINI_API_KEY) — cheap Flash models
+  openai  → a Responses API tool loop, optionally with a bounded read-only stronger adviser
   <any>   → ExecWorker: a harness described in config ("harnesses": {...}) — any CLI
             with a headless mode: a command template, how the prompt goes in, how
             the summary comes out, optionally how to read its event stream
@@ -46,10 +47,12 @@ class WorkerResult:
     seconds: float = 0.0
     tokens: Optional[int] = None          # total tokens when the harness reports them (codex has no $ cost on a ChatGPT plan)
     raw: dict = field(default_factory=dict)
+    breakdown: dict = field(default_factory=dict)  # optional per-role/model metrics (for example executor vs adviser)
 
     def as_dict(self):
         return {"ok": self.ok, "summary": self.summary[:800], "turns": self.turns, "cost_usd": self.cost_usd,
-                "error": self.error, "seconds": round(self.seconds, 1), "tokens": self.tokens}
+                "error": self.error, "seconds": round(self.seconds, 1), "tokens": self.tokens,
+                **({"breakdown": self.breakdown} if self.breakdown else {})}
 
 
 PROMPT_TEMPLATE = """You are one worker in a multi-agent system. You own exactly ONE task, in an isolated working copy. Other workers handle other tasks; do not touch anything outside your task's scope.
@@ -365,12 +368,17 @@ class ApiWorker:
         self.protected = tuple(protected)          # path prefixes the worker may not write (tests, fixtures, the plan)
 
     def _protected(self, rel: str) -> bool:
-        r = rel.lstrip("./")
-        return any(r == p.rstrip("/") or r.startswith(p) for p in self.protected)
+        parts = Path(rel).parts
+        if Path(rel).is_absolute() or ".." in parts:
+            return True
+        r = Path(*[p for p in parts if p not in ("", ".")]).as_posix()
+        return any(r == p.rstrip("/") or r.startswith(p.rstrip("/") + "/") for p in self.protected)
 
     def _safe(self, cwd: Path, rel: str) -> Path:
         p = (cwd / rel).resolve()
-        if not str(p).startswith(str(cwd.resolve())):
+        try:
+            p.relative_to(cwd.resolve())
+        except ValueError:
             raise ValueError("path escapes working copy")
         return p
 
@@ -555,6 +563,242 @@ class GeminiApiWorker(ApiWorker):
 
 
 # --------------------------------------------------------------------------
+class OpenAIWorker(ApiWorker):
+    """Responses API tool loop, optionally with a read-only stronger adviser.
+
+    The executor is the only model with write tools. When ``openai_advisor_model``
+    is configured it also gets ``ask_advisor``: a bounded consultation that sends
+    its question and selected repository files to a second model. Advice returns
+    as ordinary context; the executor remains responsible for every edit/check.
+    """
+    name = "openai"
+    SYSTEM = ("You are the sole executor responsible for completing one software-engineering task in a repository. "
+              "Be surgical: inspect only what you need, make minimal edits, run the check, then call done. Never modify "
+              "tests. If ask_advisor is available, use it only for a high-leverage diagnosis or strategy; advice is not "
+              "execution and you remain responsible for every edit and verification step.")
+    PRICES = {  # 2026-09-04 list prices, $/MTok: input, cached input, output; reasoning is output
+        # https://developers.openai.com/api/docs/models/gpt-5.4-mini
+        # https://developers.openai.com/api/docs/models/gpt-5.5
+        "gpt-5.4-mini": (0.75, 0.075, 4.50),
+        "gpt-5.5": (5.00, 0.50, 30.00),
+    }
+    ADVISE_TOOL = {
+        "name": "ask_advisor",
+        "description": ("Ask a read-only senior model for a diagnosis, implementation strategy, or private organizational "
+                        "context it has been given. It cannot edit or run tools. Include the precise question and up to four "
+                        "relevant repository paths."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string"},
+                "paths": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
+            },
+            "required": ["question", "paths"],
+        },
+    }
+    ADVISOR_SYSTEM = (
+        "You are a read-only senior software-engineering adviser. A faster executor owns the repository and all edits. "
+        "Analyze the task, question, and file snapshots. Identify the governing invariant or algorithm, explain likely "
+        "failure modes, and give concise actionable guidance or pseudocode. The request may include a PRIVATE ADVISER "
+        "CONTEXT section that the executor cannot access; treat it as authoritative and relay every detail needed to solve "
+        "the question. Never claim to have edited or tested files."
+    )
+
+    def __init__(self, check_cmd: Optional[str] = None, protected: tuple = ("tests/",), *,
+                 advisor_model: Optional[str] = None, max_advice_calls: int = 2,
+                 min_advice_calls: int = 0, advisor_context: Optional[str] = None,
+                 executor_context: Optional[str] = None,
+                 reasoning_effort: str = "medium", advisor_effort: str = "high"):
+        super().__init__(check_cmd=check_cmd, protected=protected)
+        self.advisor_model = advisor_model
+        self.max_advice_calls = max(0, int(max_advice_calls))
+        self.min_advice_calls = max(0, int(min_advice_calls))
+        if self.min_advice_calls > self.max_advice_calls:
+            raise ValueError("min_advice_calls cannot exceed max_advice_calls")
+        if self.min_advice_calls and not self.advisor_model:
+            raise ValueError("min_advice_calls requires an advisor_model")
+        self.advisor_context = advisor_context or ""
+        self.executor_context = executor_context or ""
+        self.reasoning_effort = reasoning_effort
+        self.advisor_effort = advisor_effort
+
+    def _client(self):
+        from openai import OpenAI
+        return OpenAI()                    # reads OPENAI_API_KEY
+
+    def _create(self, client, **kwargs):
+        """Small seam for deterministic unit tests."""
+        return client.responses.create(**kwargs)
+
+    @classmethod
+    def _price(cls, model: str, usage: dict) -> Optional[float]:
+        key = next((k for k in cls.PRICES if model == k or model.startswith(k + "-")), None)
+        if not key:
+            return None
+        inp, cached, out = cls.PRICES[key]
+        uncached_n = max(0, usage["input"] - usage["cached_input"])
+        return (uncached_n * inp + usage["cached_input"] * cached + usage["output"] * out) / 1e6
+
+    @staticmethod
+    def _add_usage(acc: dict, response) -> None:
+        u = getattr(response, "usage", None)
+        if not u:
+            return
+        acc["input"] += int(getattr(u, "input_tokens", 0) or 0)
+        acc["output"] += int(getattr(u, "output_tokens", 0) or 0)
+        detail = getattr(u, "input_tokens_details", None)
+        acc["cached_input"] += int(getattr(detail, "cached_tokens", 0) or 0)
+
+    @staticmethod
+    def _openai_tools(tools: list[dict]) -> list[dict]:
+        return [{"type": "function", "name": t["name"], "description": t["description"],
+                 "parameters": t["input_schema"], "strict": False} for t in tools]
+
+    def _advice_prompt(self, task_prompt: str, question: str, paths: list, cwd: Path) -> str:
+        chosen = [str(p) for p in paths[:4] if str(p).strip()]
+        if not chosen:
+            candidates = ["SPEC.md"] + [str(p.relative_to(cwd)) for p in sorted((cwd / "src").glob("*.py"))]
+            chosen = [p for p in candidates if (cwd / p).is_file()][:4]
+        chunks, used = [], 0
+        for rel in chosen:
+            try:
+                path = self._safe(cwd, rel)
+                text = path.read_text()
+            except Exception as e:
+                chunks.append(f"--- {rel}\n[unavailable: {e}]")
+                continue
+            room = max(0, 30_000 - used)
+            if room == 0:
+                break
+            text = text[:min(12_000, room)]
+            used += len(text)
+            chunks.append(f"--- {rel}\n{text}")
+        private = self.advisor_context.strip()
+        return (f"ORIGINAL TASK\n{task_prompt[:12_000]}\n\nEXECUTOR QUESTION\n{question[:4_000]}\n\n"
+                "SELECTED REPOSITORY FILES\n" + ("\n\n".join(chunks) or "[none supplied]") +
+                (f"\n\nPRIVATE ADVISER CONTEXT\n{private[:20_000]}" if private else ""))
+
+    def run(self, prompt: str, cwd: Path, model: Optional[str], max_turns: int, timeout_s: int, on_activity=None) -> WorkerResult:
+        from openai import APIConnectionError, InternalServerError, RateLimitError
+
+        client = self._client()
+        model = model or "gpt-5.4-mini"
+        tool_defs = list(self.TOOLS)
+        if self.advisor_model and self.max_advice_calls:
+            tool_defs.append(self.ADVISE_TOOL)
+        tools = self._openai_tools(tool_defs)
+        usage = {
+            "executor": {"input": 0, "cached_input": 0, "output": 0},
+            "advisor": {"input": 0, "cached_input": 0, "output": 0},
+        }
+        t0 = time.monotonic(); turns = 0; advice_calls = 0; advice_successes = 0; summary = None; last_error = None
+        direct_context = self.executor_context.strip()
+        next_input = (f"{prompt}\n\nPRIVATE ORGANIZATIONAL CONTEXT (provided directly to this executor)\n"
+                      f"{direct_context[:20_000]}" if direct_context else prompt)
+        previous_id = None
+        instructions = self.SYSTEM
+        if self.min_advice_calls:
+            instructions += (f" MANDATORY CONSULTATION CHECKPOINT: after inspecting the task but before the first edit or "
+                             f"write, call ask_advisor successfully at least {self.min_advice_calls} time(s). The harness "
+                             "will reject edits and completion until this checkpoint is satisfied.")
+
+        def create_with_retry(**kwargs):
+            delay = 2.0
+            for attempt in range(6):
+                try:
+                    return self._create(client, **kwargs)
+                except (RateLimitError, InternalServerError, APIConnectionError):
+                    if attempt == 5:
+                        raise
+                    time.sleep(delay); delay = min(delay * 2, 60)
+
+        while turns < max_turns and time.monotonic() - t0 < timeout_s and not STOP.is_set():
+            kwargs = {"model": model, "input": next_input, "instructions": instructions, "tools": tools,
+                      "parallel_tool_calls": False, "reasoning": {"effort": self.reasoning_effort},
+                      "text": {"verbosity": "low"}, "max_output_tokens": 6000, "store": True,
+                      "service_tier": "default"}
+            if previous_id:
+                kwargs["previous_response_id"] = previous_id
+            try:
+                response = create_with_retry(**kwargs)
+            except Exception as e:
+                last_error = f"openai executor: {type(e).__name__}: {str(e)[:300]}"
+                break
+            turns += 1
+            self._add_usage(usage["executor"], response)
+            previous_id = response.id
+            calls = [o for o in (response.output or []) if getattr(o, "type", None) == "function_call"]
+            response_text = (getattr(response, "output_text", "") or "").strip()
+            if on_activity and response_text:
+                on_activity("💬", response_text.replace("\n", " ")[:140])
+            if not calls:
+                break
+
+            results, stop = [], False
+            for call in calls:
+                try:
+                    args = json.loads(call.arguments or "{}")
+                except Exception:
+                    args = {}
+                if on_activity:
+                    on_activity(call.name, summarize_tool(call.name, args, cwd))
+                if call.name == "done" and advice_successes < self.min_advice_calls:
+                    output = (f"ERROR: mandatory adviser checkpoint incomplete "
+                              f"({advice_successes}/{self.min_advice_calls} successful consultations)")
+                elif call.name in {"edit_file", "write_file"} and advice_successes < self.min_advice_calls:
+                    output = (f"ERROR: consult ask_advisor before modifying files "
+                              f"({advice_successes}/{self.min_advice_calls} successful consultations)")
+                elif call.name == "done":
+                    summary = str(args.get("summary", "")); output = "acknowledged"; stop = True
+                elif call.name == "ask_advisor":
+                    if not self.advisor_model or advice_calls >= self.max_advice_calls:
+                        output = f"ERROR: adviser budget exhausted ({advice_calls}/{self.max_advice_calls})"
+                    else:
+                        advice_calls += 1
+                        if on_activity:
+                            on_activity("advisor", f"{self.advisor_model} consultation {advice_calls}/{self.max_advice_calls}")
+                        advice_prompt = self._advice_prompt(prompt, str(args.get("question", "")), list(args.get("paths") or []), cwd)
+                        try:
+                            advised = create_with_retry(model=self.advisor_model, input=advice_prompt,
+                                                        instructions=self.ADVISOR_SYSTEM,
+                                                        reasoning={"effort": self.advisor_effort},
+                                                        text={"verbosity": "low"}, max_output_tokens=6000, store=False,
+                                                        service_tier="default")
+                            self._add_usage(usage["advisor"], advised)
+                            output = (getattr(advised, "output_text", "") or "").strip()
+                            if output:
+                                advice_successes += 1
+                            else:
+                                output = "ERROR: the adviser returned no text; the mandatory checkpoint is not satisfied."
+                        except Exception as e:
+                            output = f"ERROR: adviser failed: {type(e).__name__}: {str(e)[:240]}"
+                else:
+                    output = self._dispatch(cwd, call.name, args)
+                results.append({"type": "function_call_output", "call_id": call.call_id, "output": output})
+            next_input = results
+            if stop:
+                break
+
+        costs = {"executor": self._price(model, usage["executor"]),
+                 "advisor": self._price(self.advisor_model, usage["advisor"]) if self.advisor_model else 0.0}
+        known_costs = [c for c in costs.values() if c is not None]
+        total_cost = round(sum(known_costs), 4) if len(known_costs) == len(costs) else None
+        total_tokens = sum(v["input"] + v["output"] for v in usage.values()) or None
+        breakdown = {
+            "executor": {"model": model, **usage["executor"], "cost_usd": round(costs["executor"], 4) if costs["executor"] is not None else None},
+            "advisor": {"model": self.advisor_model, **usage["advisor"], "calls": advice_calls,
+                        "successful_calls": advice_successes, "required_calls": self.min_advice_calls,
+                        "checkpoint_satisfied": advice_successes >= self.min_advice_calls,
+                        "cost_usd": round(costs["advisor"], 4) if costs["advisor"] is not None else None},
+        }
+        if STOP.is_set():
+            last_error = "interrupted (orchestrator stopping)"
+        return WorkerResult(ok=summary is not None, summary=summary or ("(stopped without done)" if not last_error else ""),
+                            turns=turns, cost_usd=total_cost, error=last_error, seconds=time.monotonic() - t0,
+                            tokens=total_tokens, raw={"usage": usage, "model": model}, breakdown=breakdown)
+
+
+# --------------------------------------------------------------------------
 class ExecWorker:
     """Any harness with a headless mode, described in config — no code needed.
 
@@ -700,7 +944,30 @@ def make_worker(kind: str, config: dict, check_cmd: Optional[str] = None, contex
         return ApiWorker(check_cmd=check_cmd, protected=protected)
     if kind == "gemini":
         return GeminiApiWorker(check_cmd=check_cmd, protected=protected)
+    if kind == "openai":
+        def package_context(key: str) -> str:
+            context_file = config.get(key)
+            if not context_file:
+                return ""
+            package_root = Path(__file__).parent.resolve()
+            candidate = (package_root / str(context_file)).resolve()
+            try:
+                candidate.relative_to(package_root)
+            except ValueError:
+                raise ValueError(f"{key} must stay inside the mas package")
+            return candidate.read_text()
+
+        advisor_context = package_context("openai_advisor_context_file")
+        executor_context = package_context("openai_executor_context_file")
+        return OpenAIWorker(check_cmd=check_cmd, protected=protected,
+                            advisor_model=config.get("openai_advisor_model"),
+                            max_advice_calls=int(config.get("openai_max_advice_calls", 2)),
+                            min_advice_calls=int(config.get("openai_min_advice_calls", 0)),
+                            advisor_context=advisor_context,
+                            executor_context=executor_context,
+                            reasoning_effort=config.get("openai_reasoning_effort", "medium"),
+                            advisor_effort=config.get("openai_advisor_effort", "high"))
     spec = (config.get("harnesses") or {}).get(kind)
     if spec:
         return ExecWorker(kind, spec, context=context)
-    raise ValueError(f"unknown worker kind: {kind} (built-in: claude, codex, api, gemini; or define it under config 'harnesses')")
+    raise ValueError(f"unknown worker kind: {kind} (built-in: claude, codex, api, gemini, openai; or define it under config 'harnesses')")

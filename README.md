@@ -4,8 +4,8 @@
 
 `mas` is the environment from the lecture, as a CLI: a **durable board** with atomic
 claims and expiring leases, **git-worktree compartments**, interchangeable **workers**
-(Claude Code, Codex, or a raw API loop — alone or as a mixed fleet), a **verification
-gate** that never trusts a worker's "done", a **restartable orchestrator** with
+(Claude Code, Codex, Anthropic/Gemini/OpenAI API loops, or any headless CLI — alone or as a mixed fleet),
+a **verification gate** that never trusts a worker's "done", a **restartable orchestrator** with
 backoff, model escalation and a circuit breaker, and an **append-only event log** with
 views for humans.
 
@@ -17,8 +17,13 @@ mas demo run 2              # mixed fleet: Claude + Codex on the same repo, 4 it
 mas demo run 3              # debate or vote: no tests — 8 independent reviewers vote on a PR, one adjudicator debates, a script tallies
 mas demo run 4              # many eyes: a harder PR with 4 planted bugs — one reviewer vs majority vs union vs debate
 mas demo run 4 --fleet claude   # same, on haiku/sonnet alternating when Codex is unavailable
+mas demo run 5              # advice as context: Mini alone vs GPT-5.5 alone vs Mini + a mandatory private-context adviser
+mas demo run 6              # chaos recovery: dead lease, bad output, crash, timeout, retries, breaker, evidence report
 mas watch                   # from a second terminal, inside ~/mas-demo
 ```
+
+Demo runs reset their destination. If `~/mas-demo` contains a different layout such as Demo 5's multi-variant results,
+preserve it with `--dir ~/mas-demo-6`, or explicitly replace it with `--force`.
 
 Each demo writes every flag it needs into the project's `.mas/config.json`, so inside the demo
 directory a plain `mas run` (after a Ctrl-C, say) continues with the same settings. Your own
@@ -99,6 +104,75 @@ What else is pluggable: the **board** is an interface (claim · heartbeat · com
 log) with SQLite as the reference implementation and GitHub Issues as a mirror; the **gate** is a shell
 command or schema; the **store** is a git worktree per attempt; the **views** are queries over the log.
 
+## Demo 5: advice as private context
+
+Demo 5 tests whether a stronger model can improve a fast executor by changing its context without taking over
+its work. It runs the same temporal authorization-engine task in four fresh repositories:
+
+1. `gpt-5.4-mini-2026-03-17` alone
+2. the same Mini executor with the private packet placed directly in its task context
+3. the same Mini executor with a mandatory read-only consultation from `gpt-5.5-2026-04-23`
+4. `gpt-5.5-2026-04-23` alone
+
+Only the executor receives repository write and check tools. The advised executor must inspect the task and consult
+before its first edit: the harness rejects `edit_file`, `write_file`, and `done` until a consultation succeeds. The
+adviser receives the task, selected repository snapshots, and the organization-private Cerulean-7 conflict profile,
+then returns text advice. The direct-context arm receives the identical packet in Mini's initial API input, without
+an adviser tool. The profile is never copied into an executor repository, and the other solo conditions do not receive
+it. The adviser cannot edit files or declare the item complete.
+
+Mini uses medium reasoning in all three Mini variants; GPT-5.5 uses high reasoning as adviser and alone. All variants have
+one attempt, one worker slot, the same 24-turn executor budget, and the same external 50-case quality oracle. The
+oracle reports 30 public-contract cases and 20 private-profile cases separately without leaking expected values to
+the worker. At the end `~/mas-demo/comparison.md` reports quality by section, board status, wall time, tokens,
+estimated API cost, executor turns, successful/attempted adviser calls, and per-role accounting.
+
+```bash
+export OPENAI_API_KEY=...       # use a live key from your environment; never commit it
+mas demo run 5
+# faster iteration:
+mas demo run 5 --variants small-alone,small-direct-context,advised
+```
+
+The direct-context arm is the retrieval control: comparing it with the advised arm asks whether the adviser adds useful
+reasoning beyond merely delivering the missing packet. This is still one fixed task; repeat across seeds and tasks before
+claiming a general adviser advantage.
+
+In the first four-arm run, direct-context Mini and advised Mini both scored 50/50. Direct context took 60.1 seconds and
+$0.0407; advice took 69.1 seconds and $0.0757. Mini alone scored 20/50, while GPT-5.5 alone scored 48/50 in 111.2 seconds
+for $0.4744. On this task, the measured gain came from routing the missing context; the extra adviser reasoning added no
+quality over giving Mini the same packet directly.
+
+## Demo 6: recovery under intentional failure
+
+Demo 6 is a deterministic, zero-API-cost chaos run. Its workers are ordinary headless subprocess harnesses, but they
+fail on cue so the outcome does not depend on hoping a model behaves badly. The first verified item writes `PLAN.json`;
+MAS validates it, rejects one malformed generated entry, and dynamically adds the recovery graph to the board.
+
+The run injects a dead orchestrator lease with partial work, a worker that confidently writes the wrong answer, a
+non-zero process exit, a worker that exceeds its time budget, and an irrecoverable item. In parallel, a healthy worker
+runs longer than its two-second lease while heartbeats renew ownership. The environment then demonstrates:
+
+- lease expiry and restart from durable SQLite state;
+- fresh worktree compartments, retry backoff, and escalation from `fast-agent` to `recovery-agent`;
+- independent command/schema gates that reject false success;
+- serialized, scoped, and idempotent landing on the shared Git main branch;
+- dependencies, `deps=settled`, a circuit breaker with its failed compartment retained, and a run-last observer;
+- durable lesson transfer, mixed harnesses, atomic claims, and the append-only WAL event log.
+
+The observer derives `result/recovery.md` and `result/recovery.json` from the database and filesystem evidence. One item
+finishes parked by design: recovery means bounding an irrecoverable fault and allowing explicitly settled dependents to
+continue, not relabeling every failure as success. The report explicitly maps its evidence back to all nine tools in the
+lecture: bounded contexts, bulkheads, the queue, idempotency/leases, timeouts/retries/backoff, the breaker, restart from
+the board, verification gates, and event-sourced views.
+
+```bash
+mas demo run 6
+less ~/mas-demo/result/recovery.md
+sqlite3 ~/mas-demo/.mas/board.db \
+  "select seq,item_id,kind,data from events order by seq"
+```
+
 ## Items that spawn items
 
 An item whose `meta.spawn` names a JSON file it landed (a planner's `PLAN.json`, a reviewer's
@@ -169,6 +243,10 @@ mas add "Fix failing tests in src/lru.py" \
   function calling. Default tiers `gemini-2.5-flash` → `gemini-2.5-pro`; the 3.5 Flash family works too
   (cost is estimated only for models with a known list price; tokens are always reported). Measured:
   a demo-1 fix in ~9 s for ~$0.005 on 2.5-flash.
+- `openai` — `OPENAI_API_KEY` in the environment (`openai>=2`); a Responses API tool loop with exact token and
+  estimated list-price accounting. Set `openai_advisor_model` to expose the bounded, read-only `ask_advisor` tool;
+  `openai_min_advice_calls` can enforce a pre-edit consultation, and a package-owned adviser context file can supply
+  information unavailable to the executor. Demo 5 uses all three. The default OpenAI tiers are GPT-5.4 Mini → GPT-5.5.
 
 ## Reliability behaviour
 
@@ -197,5 +275,5 @@ mas add "Fix failing tests in src/lru.py" \
 | `mas demo run 2` — mixed fleet Claude + Codex, same repo | 8/8 first attempt in 81s, 4 items each, both streams of tool calls live, both landing verified commits on one main |
 | `mas demo run 4` — many eyes, 4 planted bugs, Claude + Codex | 10/10 items first attempt in 8m38s, ≈$1.41. Every one of the 8 reviewers found all 4 planted bugs (recall 100% for a single reviewer, so this PR did not separate one view from many). The value showed up elsewhere: 5/8 flagged the checked-in webhook secret, 4/8 found an unplanted idempotency-key bug in renewals, 2/8 an API-contract bug; the sonnet adjudicator kept 7 findings and dropped 1 unreachable one |
 | `mas demo run 3` — debate or vote on a PR with no tests | 4 Claude reviewers independently found the planted cache-key leak (4/4, all "critical"); the sonnet adjudicator agreed with all four; the tally script landed the scorecard. Codex's backend returned 404 for the whole run, so its 4 votes tripped the breaker with evidence and the debate/tally proceeded on the settled votes |
-| unit tests, no LLM | `python -m pytest tests/test_mas.py -q` — 15 tests: exclusive claims, leases, breaker, release, idempotent merge, fake-worker orchestrator runs (gate, escalation, crash-resume, graceful stop) |
-
+| `mas demo run 6` — deterministic recovery chaos | 18/18 recovery patterns proven from SQLite evidence in about 21 seconds at zero API cost; 13 items done, one intentionally parked after its breaker opened |
+| unit tests, no LLM | `python -m pytest tests/test_mas.py -q` — exclusive claims, leases, breaker, release, idempotent merge, fake-worker orchestrator runs, API loops, demo wiring, gate, escalation, crash-resume, graceful stop |

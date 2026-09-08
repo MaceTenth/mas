@@ -6,6 +6,7 @@ They pin the invariants the orchestrator relies on:
     on the final attempt)
   * fail() backs off then parks; release() refunds the attempt
   * merges are idempotent; compartments are per attempt
+  * concurrent landings serialize shared Git state; new output trees expand
   * the orchestrator loop, driven by a fake worker, gates work and resumes
 """
 import os
@@ -234,6 +235,52 @@ def test_orchestrator_gates_merges_and_learns(repo, monkeypatch):
     assert not (repo / ".mas" / "work" / "fix-a-a1").exists()     # compartment cleaned
 
 
+def test_orchestrator_serializes_shared_git_landings(repo, monkeypatch):
+    """Parallel workers are fine; shared root merge+commit must be one atomic boundary."""
+    import shlex
+    import threading
+    from mas import orchestrator as om
+    from mas.workers import WorkerResult
+
+    class ParallelFixer:
+        def run(self, prompt, cwd, model, max_turns, timeout_s, on_activity=None):
+            rel = "src/a.py" if Path(cwd).name.startswith("fix-a-") else "src/b.py"
+            (Path(cwd) / rel).write_text("value = 42\n")
+            return WorkerResult(True, summary=f"fixed {rel}")
+
+    board = SQLiteBoard(repo / ".mas" / "board.db")
+    py = shlex.quote(sys.executable)
+    for name in ("a", "b"):
+        rel = f"src/{name}.py"
+        check = f"cmd:{py} -c \"assert open('{rel}').read() == 'value = 42\\n'\""
+        board.add(Item(id=f"fix-{name}", title=f"fix {name}", brief="", check=check, merge_paths=[rel]))
+    monkeypatch.setattr(om, "make_worker", lambda *args, **kwargs: ParallelFixer())
+
+    active = 0
+    peak = 0
+    guard = threading.Lock()
+    original_commit = Workspace.commit
+
+    def observed_commit(self, message, files):
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.05)
+        try:
+            return original_commit(self, message, files)
+        finally:
+            with guard:
+                active -= 1
+
+    monkeypatch.setattr(Workspace, "commit", observed_commit)
+    cfg = {"lease_seconds": 30, "heartbeat_seconds": 1, "max_turns": 2, "attempt_timeout_seconds": 10,
+           "backoff_base_seconds": 0.01, "models": {"claude": ["tiny"]}}
+    stats = om.Orchestrator(board, Workspace(repo), cfg, ["claude"], concurrency=2, log=lambda _: None).run(poll_s=0.01)
+    assert stats["by_status"] == {"done": 2} and peak == 1
+    assert not any(e["kind"] == "orchestrator_error" for e in board.events())
+
+
 def test_orchestrator_rejects_liars_escalates_and_parks(repo, monkeypatch):
     FakeWorker.calls.clear()
     board = SQLiteBoard(repo / ".mas" / "board.db")
@@ -352,6 +399,25 @@ def test_demo_registry_bakes_flags_into_config_and_assigns_workers(tmp_path):
     dest1, items1 = init_demo(dest, demo="1", force=True)               # reset works
     assert all(i.worker_pref is None for i in items1)
     assert json.loads((dest1 / ".mas" / "config.json").read_text())["workers"] == ["claude"]
+
+
+def test_demo_run_force_explicitly_replaces_non_mas_directory(tmp_path, monkeypatch, capsys):
+    from mas import cli
+
+    occupied = tmp_path / "old-output"
+    occupied.mkdir()
+    (occupied / "important.txt").write_text("old\n")
+    monkeypatch.setattr(cli, "shutil_which", lambda _: "/fake/worker")
+    monkeypatch.setattr(cli, "cmd_run", lambda *args, **kwargs: None)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["demo", "run", "1", "--dir", str(occupied), "--plain"])
+    assert "--force" in str(exc.value) and (occupied / "important.txt").exists()
+
+    cli.main(["demo", "run", "1", "--dir", str(occupied), "--force", "--plain"])
+    assert not (occupied / "important.txt").exists()
+    assert (occupied / ".mas" / "board.db").exists()
+    assert "removed existing demo directory (--force)" in capsys.readouterr().out
 
 
 # ----------------------------------------------------------------- harnesses
@@ -667,6 +733,178 @@ def test_gemini_worker_tool_loop(tmp_path, monkeypatch):
     assert GeminiApiWorker(check_cmd=None).PRICES.get("gemini-9-ultra") is None   # unknown model → cost None, tokens still reported
 
 
+def test_openai_worker_can_consult_read_only_adviser_and_accounts_by_role(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace as NS
+    from mas.workers import OpenAIWorker
+
+    (tmp_path / "src").mkdir(); (tmp_path / "src" / "policylog.py").write_text("def authorize(): pass\n")
+    (tmp_path / "SPEC.md").write_text("Use the private conflict profile.\n")
+    seen = []
+
+    def response(rid, output, input_tokens, output_tokens, text=""):
+        return NS(id=rid, output=output, output_text=text,
+                  usage=NS(input_tokens=input_tokens, output_tokens=output_tokens,
+                           input_tokens_details=NS(cached_tokens=10 if "exec" in rid else 0)))
+
+    def call(name, arguments, cid):
+        return NS(type="function_call", name=name, arguments=json.dumps(arguments), call_id=cid)
+
+    def fake_create(self, client, **kwargs):
+        seen.append(kwargs)
+        if kwargs["model"].startswith("gpt-5.5"):
+            assert "private conflict profile" in kwargs["input"] and "CERULEAN SECRET" in kwargs["input"]
+            assert "tools" not in kwargs
+            return response("advice-1", [], 500, 100, "Use the exact private precedence tuple.")
+        executor_n = sum(1 for x in seen if x["model"].startswith("gpt-5.4-mini"))
+        if executor_n == 1:
+            names = [t["name"] for t in kwargs["tools"]]
+            assert "ask_advisor" in names
+            assert "MANDATORY CONSULTATION CHECKPOINT" in kwargs["instructions"]
+            return response("exec-1", [call("ask_advisor", {"question": "What is the private profile?", "paths": ["SPEC.md", "src/policylog.py"]}, "c1")], 100, 20)
+        assert "private precedence tuple" in kwargs["input"][0]["output"]
+        assert kwargs["previous_response_id"] == "exec-1"
+        return response("exec-2", [call("done", {"summary": "implemented the advised design"}, "c2")], 100, 20)
+
+    monkeypatch.setattr(OpenAIWorker, "_client", lambda self: None)
+    monkeypatch.setattr(OpenAIWorker, "_create", fake_create)
+    activities = []
+    worker = OpenAIWorker(check_cmd="true", advisor_model="gpt-5.5-2026-04-23", max_advice_calls=2,
+                          min_advice_calls=1, advisor_context="CERULEAN SECRET")
+    result = worker.run("fix it", tmp_path, "gpt-5.4-mini-2026-03-17", 6, 60,
+                        on_activity=lambda tool, arg: activities.append((tool, arg)))
+    assert result.ok and result.summary == "implemented the advised design" and result.turns == 2
+    assert result.tokens == 840 and result.breakdown["advisor"]["calls"] == 1
+    assert result.breakdown["advisor"]["successful_calls"] == 1
+    assert result.breakdown["advisor"]["checkpoint_satisfied"] is True
+    assert result.breakdown["executor"]["input"] == 200 and result.breakdown["advisor"]["output"] == 100
+    assert result.cost_usd == 0.0058
+    assert [a[0] for a in activities] == ["ask_advisor", "advisor", "done"]
+
+
+def test_openai_worker_receives_direct_context_without_adviser_tool(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace as NS
+    from mas.workers import OpenAIWorker
+
+    seen = []
+
+    def fake_create(self, client, **kwargs):
+        seen.append(kwargs)
+        assert kwargs["model"].startswith("gpt-5.4-mini")
+        assert "PRIVATE ORGANIZATIONAL CONTEXT" in kwargs["input"]
+        assert "CERULEAN SECRET" in kwargs["input"]
+        assert "ask_advisor" not in [tool["name"] for tool in kwargs["tools"]]
+        call = NS(type="function_call", name="done", arguments=json.dumps({"summary": "used direct context"}), call_id="c1")
+        usage = NS(input_tokens=100, output_tokens=20, input_tokens_details=NS(cached_tokens=0))
+        return NS(id="exec-1", output=[call], output_text="", usage=usage)
+
+    monkeypatch.setattr(OpenAIWorker, "_client", lambda self: None)
+    monkeypatch.setattr(OpenAIWorker, "_create", fake_create)
+    result = OpenAIWorker(check_cmd="true", executor_context="CERULEAN SECRET").run(
+        "fix it", tmp_path, "gpt-5.4-mini-2026-03-17", 2, 60)
+    assert result.ok and result.summary == "used direct context"
+    assert result.breakdown["advisor"]["calls"] == 0
+    assert len(seen) == 1
+
+
+def test_openai_worker_blocks_edits_until_mandatory_consultation_succeeds(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace as NS
+    from mas.workers import OpenAIWorker
+
+    (tmp_path / "src").mkdir()
+    target = tmp_path / "src" / "policylog.py"
+    target.write_text("value = 1\n")
+    executor_turn = 0
+
+    def response(rid, output, text=""):
+        return NS(id=rid, output=output, output_text=text,
+                  usage=NS(input_tokens=10, output_tokens=5,
+                           input_tokens_details=NS(cached_tokens=0)))
+
+    def call(name, arguments, cid):
+        return NS(type="function_call", name=name, arguments=json.dumps(arguments), call_id=cid)
+
+    def fake_create(self, client, **kwargs):
+        nonlocal executor_turn
+        if kwargs["model"].startswith("gpt-5.5"):
+            return response("advisor", [], "the private tuple")
+        executor_turn += 1
+        if executor_turn == 1:
+            return response("e1", [call("edit_file", {"path": "src/policylog.py", "old_string": "1", "new_string": "2"}, "c1")])
+        if executor_turn == 2:
+            assert "consult ask_advisor" in kwargs["input"][0]["output"]
+            assert target.read_text() == "value = 1\n"
+            return response("e2", [call("ask_advisor", {"question": "profile?", "paths": []}, "c2")])
+        if executor_turn == 3:
+            return response("e3", [call("edit_file", {"path": "src/policylog.py", "old_string": "1", "new_string": "2"}, "c3")])
+        return response("e4", [call("done", {"summary": "consulted then edited"}, "c4")])
+
+    monkeypatch.setattr(OpenAIWorker, "_client", lambda self: None)
+    monkeypatch.setattr(OpenAIWorker, "_create", fake_create)
+    worker = OpenAIWorker(check_cmd="true", advisor_model="gpt-5.5-2026-04-23",
+                          min_advice_calls=1, advisor_context="private")
+    result = worker.run("implement it", tmp_path, "gpt-5.4-mini-2026-03-17", 8, 60)
+    assert result.ok and target.read_text() == "value = 2\n"
+    assert result.breakdown["advisor"]["checkpoint_satisfied"] is True
+
+
+def test_demo_5_wires_fair_variants_and_external_quality_oracle(tmp_path):
+    import json
+    from mas.demo import ADVISOR_SCORE, ADVISOR_SMALL, ADVISOR_STRONG, init_demo
+    from mas.workers import make_worker
+
+    advised, items = init_demo(tmp_path / "advised", demo="5", variant="advised", base_config={})
+    cfg = json.loads((advised / ".mas" / "config.json").read_text())
+    assert [i.id for i in items] == ["authorize"] and items[0].worker_pref == "openai"
+    assert items[0].meta["model"] == ADVISOR_SMALL and str(ADVISOR_SCORE) in items[0].check
+    assert cfg["models"] == {"openai": [ADVISOR_SMALL]} and cfg["openai_advisor_model"] == ADVISOR_STRONG
+    assert cfg["openai_min_advice_calls"] == 1 and cfg["openai_advisor_context_file"] == "demo_advisor/cerulean7.md"
+    assert "authority rank" in make_worker("openai", cfg, check_cmd="true").advisor_context
+    assert cfg["max_attempts"] == 1 and cfg["concurrency"] == 1
+
+    direct, direct_items = init_demo(tmp_path / "direct", demo="5", variant="small-direct-context", base_config={})
+    direct_cfg = json.loads((direct / ".mas" / "config.json").read_text())
+    direct_worker = make_worker("openai", direct_cfg, check_cmd="true")
+    assert direct_items[0].meta["model"] == ADVISOR_SMALL and direct_cfg["openai_advisor_model"] is None
+    assert direct_cfg["openai_min_advice_calls"] == 0
+    assert direct_cfg["openai_executor_context_file"] == "demo_advisor/cerulean7.md"
+    assert "openai_advisor_context_file" not in direct_cfg
+    assert "authority rank" in direct_worker.executor_context and direct_worker.advisor_context == ""
+
+    strong, strong_items = init_demo(tmp_path / "strong", demo="5", variant="strong-alone", base_config={})
+    strong_cfg = json.loads((strong / ".mas" / "config.json").read_text())
+    assert strong_items[0].meta["model"] == ADVISOR_STRONG and strong_cfg["openai_advisor_model"] is None
+    assert strong_cfg["openai_min_advice_calls"] == 0 and "openai_advisor_context_file" not in strong_cfg
+
+    scored = subprocess.run([sys.executable, str(ADVISOR_SCORE), str(advised), "--json"], capture_output=True, text=True)
+    quality = json.loads(scored.stdout)
+    assert scored.returncode == 1 and quality["passed"] < quality["total"] and quality["total"] == 50
+    assert quality["sections"]["public_contract"]["total"] == 30
+    assert quality["sections"]["private_profile"]["total"] == 20
+
+
+def test_demo_6_seeds_dead_lease_and_deterministic_recovery_graph(tmp_path):
+    import json
+    from mas.demo import init_demo
+
+    dest, items = init_demo(tmp_path / "recovery", demo="6", base_config={})
+    cfg = json.loads((dest / ".mas" / "config.json").read_text())
+    assert [i.id for i in items] == ["crash-resume", "plan-recovery"]
+    assert cfg["workers"] == ["chaos", "observer"] and cfg["concurrency"] == 4
+    assert cfg["lease_seconds"] == 2 and cfg["models"]["chaos"] == ["fast-agent", "recovery-agent"]
+    assert set(cfg["harnesses"]) == {"chaos", "observer"}
+    board = SQLiteBoard(dest / ".mas" / "board.db")
+    crashed = board.get("crash-resume")
+    assert crashed.status == LEASED and crashed.attempts == 1 and crashed.lease_owner == "demo6-dead-orchestrator"
+    stale = dest / ".mas" / "work" / "crash-resume-a1" / "artifacts" / "crash.txt"
+    assert stale.read_text() == "partial-output-from-dead-worker\n"
+    assert "fault_injected" in [e["kind"] for e in board.events("crash-resume")]
+    plan = board.get("plan-recovery")
+    assert plan.status == OPEN and plan.meta["spawn"]["after"][0]["meta"] == {"deps": "settled", "run_last": True}
+
+
 def test_merge_paths_accept_directory_prefixes(repo):
     ws = Workspace(repo)
     p = ws.prepare("d-a1")
@@ -675,6 +913,16 @@ def test_merge_paths_accept_directory_prefixes(repo):
     (p / "tests").mkdir(); (p / "tests" / "test_x.py").write_text("def test(): pass\n")   # a worker 'fixing' the tests
     landed = ws.merge(p, ["src/"])
     assert sorted(landed) == ["src/a.py", "src/new.py"] and not (repo / "tests" / "test_x.py").exists()
+
+
+def test_merge_directory_prefix_expands_wholly_untracked_directory(repo):
+    ws = Workspace(repo)
+    p = ws.prepare("new-tree-a1")
+    (p / "result").mkdir()
+    (p / "result" / "report.md").write_text("report\n")
+    (p / "result" / "evidence.json").write_text("{}\n")
+    assert sorted(ws.merge(p, ["result/"])) == ["result/evidence.json", "result/report.md"]
+    assert (repo / "result" / "report.md").read_text() == "report\n"
 
 
 
@@ -688,7 +936,43 @@ def test_api_worker_protected_paths_and_claude_timeout_usage(tmp_path):
     assert "protected" in w._dispatch(tmp_path, "write_file", {"path": "tests/t.py", "content": "y"})
     assert "protected" in w._dispatch(tmp_path, "edit_file", {"path": "./fixtures/a/NOTES.md", "old_string": "a", "new_string": "b"})
     assert "protected" in w._dispatch(tmp_path, "write_file", {"path": "PLAN.json", "content": "{}"})
+    assert w._dispatch(tmp_path, "write_file", {"path": "../escaped.txt", "content": "secret"}).startswith("ERROR:")
+    assert not (tmp_path.parent / "escaped.txt").exists()
     assert w._dispatch(tmp_path, "write_file", {"path": "exports/x.py", "content": "ok"}) == "wrote exports/x.py"
     acc = {"input_tokens": 1000, "output_tokens": 2000, "cache_read_input_tokens": 100000, "cache_creation_input_tokens": 0}
     assert estimate_claude_cost("sonnet", acc) == round((1000 * 3 + 2000 * 15 + 100000 * 0.3) / 1e6, 4)
     assert estimate_claude_cost("mystery-model", acc) is None and estimate_claude_cost("haiku", {k: 0 for k in acc}) is None
+
+
+# ------------------------------------------------------------------ planner output → items
+def test_parse_plan_slugs_ids_and_resolves_dependencies():
+    from mas.plan import parse_plan
+    items = parse_plan({"items": [
+        {"id": "flights", "title": "Find flights", "brief": "b", "check": "cmd:test -s flights.json", "merge_paths": ["flights.json"]},
+        {"id": "hotels", "title": "Pick hotels", "brief": "b", "check": "human"},
+        {"title": "Total the budget", "brief": "b", "check": "cmd:test -s budget.json", "depends_on": ["flights", "Pick hotels", "nonexistent"]},
+        {"title": "no check here", "brief": "b"},
+        {"id": "flights", "title": "Duplicate id", "brief": "b", "check": "human"},
+    ]})
+    assert [i.id for i in items] == ["flights", "hotels", "total-the-budget", "flights-4"]
+    assert items[2].depends_on == ["flights", "hotels"]               # by id and by title; unknown dropped
+    assert items[1].check == "human" and items[0].merge_paths == ["flights.json"]
+
+
+def test_cli_edit_fixes_a_parked_contract_and_logs_it(repo, monkeypatch, capsys):
+    from mas import cli
+    monkeypatch.chdir(repo)
+    cli.main(["init"])
+    cli.main(["add", "Budget", "--id", "budget", "--brief", "b", "--check", "cmd:python -m pytest -q tests/t.py", "--merge", "budget.csv", "--max-attempts", "1"])
+    board = SQLiteBoard(repo / ".mas" / "board.db")
+    board.claim("w", 60, ["claude"]); board.fail("budget", "w", {"passed": False, "detail": "python: command not found"}, backoff_base=0.01)
+    assert board.get("budget").status == PARKED                                                     # max_attempts=1 → the breaker opens at once
+    cli.main(["edit", "budget", "--check", "cmd:/usr/bin/env python3 -m pytest -q tests/t.py", "--depends-on", ""])
+    out = capsys.readouterr().out
+    assert "edited budget: check" in out and "mas unpark budget" in out
+    b2 = board.get("budget")
+    assert b2.check.startswith("cmd:/usr/bin/env python3") and b2.status == PARKED and b2.attempts == 1 and b2.merge_paths == ["budget.csv"]
+    kinds = [e["kind"] for e in board.events("budget")]
+    assert kinds.count("added") == 1 and kinds[-1] == "edited"
+    cli.main(["unpark", "budget"])
+    assert board.get("budget").status == OPEN and board.get("budget").attempts == 0

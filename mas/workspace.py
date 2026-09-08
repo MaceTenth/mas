@@ -47,7 +47,9 @@ class Workspace:
 
     def changed_files(self, path: Path) -> list[str]:
         if self.is_git:
-            out = self._git("status", "--porcelain", cwd=path).stdout
+            # Enumerate files inside wholly new directories so a merge contract
+            # such as ``result/`` can land newly generated output trees.
+            out = self._git("status", "--porcelain", "--untracked-files=all", cwd=path).stdout
             files = []
             for line in out.splitlines():
                 name = line[3:].strip().strip('"')

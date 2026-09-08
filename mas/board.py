@@ -100,10 +100,12 @@ class SQLiteBoard:
         item.created_at = item.created_at or now
         item.updated_at = now
         item.id = item.id or uuid.uuid4().hex[:8]
+        existing = self.get(item.id)
         row = item.to_row()
         cols = ", ".join(f'"{k}"' for k in row)
         self._exec(f"INSERT OR REPLACE INTO items ({cols}) VALUES ({', '.join('?' for _ in row)})", list(row.values()))
-        self.log(item.id, "added", {"title": item.title, "check": item.check})
+        if existing is None:                                 # re-adding an existing item is an edit, not a new task
+            self.log(item.id, "added", {"title": item.title, "check": item.check})
         return item
 
     def claim(self, owner: str, lease_seconds: float, worker_kinds: Iterable[str]) -> Optional[Item]:

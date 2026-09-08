@@ -1,0 +1,18 @@
+  flights  Research round-trip TLV↔Japan flights
+      check: cmd:test -s trip/flights.md  merge: ['trip/flights.md']
+  lodging  Plan lodging for all three cities
+      check: cmd:test -s trip/lodging.md  merge: ['trip/lodging.md']
+  transport  Cost intra-Japan transport & JR Pass decision
+      check: cmd:test -s trip/transport.md  merge: ['trip/transport.md']
+  itinerary  Build the day-by-day 10-day itinerary
+      check: cmd:test -s trip/itinerary.md  merge: ['trip/itinerary.md']
+  food  Plan dining recommendations & food budget
+      check: cmd:test -s trip/food.md  merge: ['trip/food.md']
+  activities  List attractions & experiences with prices
+      check: cmd:test -s trip/activities.md  merge: ['trip/activities.md']
+  essentials  Cover visa, insurance, connectivity, weather & packing
+      check: cmd:test -s trip/essentials.md  merge: ['trip/essentials.md']
+  budget  Reconcile all costs into a ≤ $6,000 master budget
+      check: cmd:python3 -c 'import re,sys; t=open("trip/budget.md").read(); m=re.search(r"GRAND TOTAL:\s*\$\s*([0-9][0-9,]*)", t); sys.exit(0 if m and int(m.group(1).replace(",",""))<=6000 else 1)'  merge: ['trip/budget.md']
+
+8 items (dry run — not added)

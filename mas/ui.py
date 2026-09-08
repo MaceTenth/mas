@@ -44,6 +44,7 @@ def item_style(item_id: Optional[str]) -> str:
 KINDS = {
     "run_started":        ("▶", "bold white", "run"),
     "run_finished":       ("■", "bold white", "run"),
+    "planned":            ("🧭", "bold cyan", "plan"),
     "added":              ("＋", "cyan", "board"),
     "claimed":            ("🔒", "blue", "board"),
     "compartment":        ("🧱", "magenta", "bulkhead"),
@@ -51,6 +52,7 @@ KINDS = {
     "activity":           ("⚙", "grey62", "worker"),
     "worker_finished":    ("🤖", "white", "worker"),
     "worker_interrupted": ("✋", "yellow", "worker"),
+    "fault_injected":     ("⚡", "bold red", "chaos"),
     "gate":               ("🛡", "yellow", "gate"),
     "verified":           ("✅", "green", "gate"),
     "rejected":           ("❌", "red", "gate"),
@@ -67,6 +69,7 @@ KINDS = {
     "awaiting_human":     ("🙋", "magenta", "human"),
     "approved":           ("👍", "green", "human"),
     "unparked":           ("🔓", "cyan", "breaker"),
+    "edited":             ("✎", "cyan", "contract"),
 }
 STATUS_STYLE = {OPEN: "grey62", LEASED: "bright_blue", DONE: "green", PARKED: "red", AWAITING_HUMAN: "magenta"}
 
@@ -102,6 +105,9 @@ def describe(ev: dict) -> Text:
         s = d.get("stats", {})
         t.append("interrupted" if d.get("interrupted") else "run finished", "bold")
         t.append(f" · {s.get('by_status')} · attempts {s.get('attempts')} · cost {_money(s.get('cost_usd'))}", "grey70")
+    elif k == "planned":
+        t.append("goal decomposed · ", "bold cyan"); t.append(_short(d.get("goal"), 60), "grey70")
+        t.append(f" → {len(d.get('items') or [])} items by {d.get('planner')}", "cyan")
     elif k == "added":
         t.append("added to board · check ", "cyan"); t.append(_short(d.get("check"), 70), "grey70")
     elif k == "claimed":
@@ -131,6 +137,8 @@ def describe(ev: dict) -> Text:
         if d.get("error"): t.append(" · " + _short(d["error"], 60), "red")
     elif k == "worker_interrupted":
         t.append("worker stopped (graceful shutdown) · attempt refunded", "yellow")
+    elif k == "fault_injected":
+        t.append("intentional fault · ", "bold red"); t.append(_short(d.get("fault"), 60), "red")
     elif k == "gate":
         t.append("gate running ", "yellow"); t.append(_short(d.get("check"), 80), "grey70")
     elif k == "verified":
@@ -175,6 +183,8 @@ def describe(ev: dict) -> Text:
         t.append("approved by human", "green")
     elif k == "unparked":
         t.append("unparked · attempts reset", "cyan")
+    elif k == "edited":
+        t.append("contract edited by a human · ", "cyan"); t.append(", ".join((d.get("changed") or {}).keys()), "grey70")
     else:
         t.append(k, "bold"); t.append(" " + _short(json.dumps(d, default=str), 80), "grey62")
     return t

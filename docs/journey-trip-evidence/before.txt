@@ -1,0 +1,36 @@
+=== sqlite: tables and journal mode ===
+['events', 'items', 'lessons', 'sqlite_sequence']
+journal_mode = wal
+
+=== items table (one row per task) ===
+{'id': 'budget', 'status': 'open', 'priority': 5, 'attempts': 0, 'max_attempts': 3, 'worker_pref': None, 'depends_on': '["flights", "lodging", "transport", "activities"]', 'merge_paths': '["budget.csv", "tests/test_budget.py"]', 'chk': 'cmd:python -m pytest -q tests/test_budget.py'}
+{'id': 'practical', 'status': 'open', 'priority': 4, 'attempts': 0, 'max_attempts': 3, 'worker_pref': None, 'depends_on': '[]', 'merge_paths': '["practical.md"]', 'chk': "cmd:test -f practical.md && grep -qiE 'visa' practical.md &&"}
+{'id': 'transport', 'status': 'open', 'priority': 3, 'attempts': 0, 'max_attempts': 3, 'worker_pref': None, 'depends_on': '[]', 'merge_paths': '["transport.md"]', 'chk': "cmd:test -f transport.md && grep -qiE 'JR|suica|shinkansen|r"}
+{'id': 'activities', 'status': 'open', 'priority': 3, 'attempts': 0, 'max_attempts': 3, 'worker_pref': None, 'depends_on': '[]', 'merge_paths': '["activities.md"]', 'chk': "cmd:test -f activities.md && grep -qiE 'kyoto' activities.md"}
+{'id': 'lodging', 'status': 'open', 'priority': 2, 'attempts': 0, 'max_attempts': 3, 'worker_pref': None, 'depends_on': '[]', 'merge_paths': '["lodging.md"]', 'chk': "cmd:test -f lodging.md && grep -qiE 'night' lodging.md && gr"}
+{'id': 'itinerary', 'status': 'open', 'priority': 2, 'attempts': 0, 'max_attempts': 3, 'worker_pref': None, 'depends_on': '[]', 'merge_paths': '["itinerary.md"]', 'chk': 'cmd:for d in 1 2 3 4 5 6 7 8 9 10; do grep -qiE "day[ ]?${d}'}
+{'id': 'flights', 'status': 'open', 'priority': 1, 'attempts': 0, 'max_attempts': 3, 'worker_pref': None, 'depends_on': '[]', 'merge_paths': '["flights.md"]', 'chk': "cmd:test -f flights.md && grep -qiE 'tel aviv|TLV' flights.m"}
+
+=== events so far (the journal begins) ===
+1 flights added {"title": "Select round-trip flights TLV\u2194Japan", "check": "cmd:test -f flights.md && grep -qiE 'tel aviv|
+2 lodging added {"title": "Plan 10 nights of accommodation", "check": "cmd:test -f lodging.md && grep -qiE 'night' lodging.md 
+3 itinerary added {"title": "Build day-by-day 10-day itinerary", "check": "cmd:for d in 1 2 3 4 5 6 7 8 9 10; do grep -qiE \"day
+4 transport added {"title": "Plan intra-Japan transportation", "check": "cmd:test -f transport.md && grep -qiE 'JR|suica|shinkan
+5 activities added {"title": "Plan activities, sights, and food", "check": "cmd:test -f activities.md && grep -qiE 'kyoto' activi
+6 practical added {"title": "Compile pre-trip practical info", "check": "cmd:test -f practical.md && grep -qiE 'visa' practical.
+7 budget added {"title": "Consolidate and validate \u2264 $6,000 budget", "check": "cmd:python -m pytest -q tests/test_budget
+8 None planned {"goal": "Plan a 10-day trip from Israel to Japan in November for two people, budget $6,000", "planner": "clau
+
+=== the exact prompt a worker will receive for item 'flights' ===
+You are one worker in a multi-agent system. You own exactly ONE task, in an isolated working copy. Other workers handle other tasks; do not touch anything outside your task's scope.
+
+TASK: Select round-trip flights TLV↔Japan
+
+Research and select round-trip flights for 2 travelers from Tel Aviv (TLV) to Japan for a 10-day trip in November 2026. Evaluate both a plain round-trip via Tokyo (HND/NRT) and an open-jaw (into Tokyo, out of Osaka KIX), since the canonical route for this trip is Tokyo → Hakone/Mt Fuji → Kyoto → Osaka. Deliverable: create `flights.md` at repo root containing 2–3 concrete routing/carrier options with approximate November 2026 fares, layover/stopover details, and total travel time; then a recommended choice with outbound + return dates (early-to-mid November), booking notes, and total price for 2 people in USD. Target cost: ≤ $2,300 for both travelers combined (this is the largest budget line of a $6,000 all-in trip). Must reference Tel Aviv/TLV, mention the return/round-trip (or open-jaw) leg, and include at least one dollar amount (e.g. $2,150). Constraint: research/planning document only — no real booking. One file only: flights.md.
+
+RULES
+- Work only inside this directory. Do not modify tests or verification files.
+- Your work will be verified by the orchestrator running: test -f flights.md && grep -qiE 'tel aviv|TLV' flights.md && grep -qiE 'return|round[- ]?trip|open[- ]?jaw' flights.md && grep -qE '[$][0-9]' flights.md
+  Run that yourself before finishing; do not report success unless it passes.
+- Keep changes minimal and focused on the task.
+

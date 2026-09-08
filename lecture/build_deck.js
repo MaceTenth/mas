@@ -39,7 +39,7 @@ const bullets = (s, x, y, w, h, items, opts = {}) =>
   s.background = { color: BG };
   s.addText("One Agent Is Already a Swarm", { x: 0.9, y: 2.35, w: 11.5, h: 1.1, fontFace: H, fontSize: 48, bold: true, color: INK, align: "center", margin: 0 });
   s.addText("Why multi-agent systems are infrastructure, not agent count — a six-round empirical lecture", { x: 1.9, y: 3.55, w: 9.5, h: 0.6, fontFace: B, fontSize: 19, color: SW, align: "center", margin: 0 });
-  s.addText("claude_mas  ·  Haiku 4.5  ·  128 verified task lifecycles  ·  total spend $11.30", { x: 2.9, y: 6.5, w: 7.5, h: 0.35, fontFace: M, fontSize: 12, color: MUT, align: "center", margin: 0 });
+  s.addText("mas  ·  Haiku 4.5  ·  128 verified task lifecycles  ·  total spend $11.30", { x: 2.9, y: 6.5, w: 7.5, h: 0.35, fontFace: M, fontSize: 12, color: MUT, align: "center", margin: 0 });
   s.addNotes("Open with the 77-second Remotion video, then this title. Framing: everything in this talk is measured, not opined. Six benchmark rounds, eleven dollars.");
 }
 
@@ -433,8 +433,8 @@ const bullets = (s, x, y, w, h, items, opts = {}) =>
   s.addText("A single agent is a swarm with N = 1.", { x: 1.2, y: 2.5, w: 10.9, h: 0.9, fontFace: H, fontSize: 40, bold: true, color: INK, align: "center", margin: 0 });
   s.addText("You never choose whether to build the MAS — only N.", { x: 1.2, y: 3.6, w: 10.9, h: 0.7, fontFace: H, fontSize: 26, bold: true, color: SW, align: "center", margin: 0 });
   s.addText("Users don't want agents. They want work that doesn't get lost.\nAgents are the demo; infrastructure is the product. Build the board, the gate, and the lease.", { x: 1.9, y: 4.7, w: 9.5, h: 1.0, fontFace: B, fontSize: 16, color: MUT, align: "center", margin: 0 });
-  s.addText("full report + data: claude_mas benchmark artifact  ·  six rounds  ·  $11.30", { x: 2.9, y: 6.5, w: 7.5, h: 0.35, fontFace: M, fontSize: 11.5, color: MUT, align: "center", margin: 0 });
+  s.addText("full report + data: mas benchmark artifact  ·  six rounds  ·  $11.30", { x: 2.9, y: 6.5, w: 7.5, h: 0.35, fontFace: M, fontSize: 11.5, color: MUT, align: "center", margin: 0 });
   s.addNotes("End here. Q&A prompts to expect: 'what about heterogeneous tasks?' (untested, round 7 candidate — SWE-bench-style real bugs) and 'majority voting?' (untested cell of the consensus table).");
 }
 
-pres.writeFile({ fileName: "/Users/shimonmoyal/claude_mas/lecture/one-agent-is-a-swarm.pptx" }).then(() => console.log("written"));
+pres.writeFile({ fileName: require("path").join(__dirname, "one-agent-is-a-swarm.pptx") }).then(() => console.log("written"));

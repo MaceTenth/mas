@@ -54,6 +54,9 @@ class Orchestrator:
         self._inflight: dict[str, str] = {}      # item_id -> owner, for graceful release on stop
         self._released: set = set()
         self._lock = threading.Lock()
+        # Work happens concurrently in isolated worktrees, but prepare/cleanup and especially
+        # merge+commit mutate shared git metadata. Serialize that narrow store boundary.
+        self._workspace_lock = threading.RLock()
         self.stopping = threading.Event()
         self.interrupted = False
 
@@ -81,7 +84,8 @@ class Orchestrator:
             model = self._model_for(kind, item.attempts)
         self.log(f"[{item.id}] attempt {item.attempts}/{item.max_attempts} → {kind}" + (f" ({model})" if model else ""))
         key = f"{item.id}-a{item.attempts}"          # one compartment per attempt, never shared
-        path = self.ws.prepare(key)
+        with self._workspace_lock:
+            path = self.ws.prepare(key)
         rel = os.path.relpath(path, self.ws.root)
         mode = "worktree" if self.ws.is_git else "copy"
         self.board.log(item.id, "compartment", {"path": rel, "branch": f"mas/{key}" if self.ws.is_git else None, "mode": mode})
@@ -120,7 +124,8 @@ class Orchestrator:
             # graceful stop: hand the lease back (attempt refunded); nothing is gated or merged
             self.board.log(item.id, "worker_interrupted", {"worker": kind, "model": model, "attempt": item.attempts})
             self._release(item.id, owner)
-            self.ws.cleanup(key, path)
+            with self._workspace_lock:
+                self.ws.cleanup(key, path)
             return
         self.board.log(item.id, "worker_finished", {**result.as_dict(), "worker": kind, "model": model})
 
@@ -134,15 +139,18 @@ class Orchestrator:
             self.github.on_verdict(item, vd, result.summary)
 
         if verdict.kind == "human":
-            landed = self.ws.merge(path, item.merge_paths)      # stage the work; a human decides
+            with self._workspace_lock:
+                landed = self.ws.merge(path, item.merge_paths)      # stage the work; a human decides
             self.board.await_human(item.id, owner, {**vd, "landed": landed})
             self.log(f"[{item.id}] awaiting human approval ({len(landed)} files staged)")
-            self.ws.cleanup(key, path)
+            with self._workspace_lock:
+                self.ws.cleanup(key, path)
             return
 
         if verdict.passed:
-            landed = self.ws.merge(path, item.merge_paths)      # idempotent
-            sha = self.ws.commit(f"mas: {item.title} [{item.id}]", landed) if self.commit else None
+            with self._workspace_lock:
+                landed = self.ws.merge(path, item.merge_paths)      # idempotent
+                sha = self.ws.commit(f"mas: {item.title} [{item.id}]", landed) if self.commit else None
             self.board.log(item.id, "merged", {"landed": landed, "commit": sha})
             spawned = self._spawn(item) if item.meta.get("spawn") else []      # children exist BEFORE the parent is done
             ok = self.board.complete(item.id, owner, {**vd, "landed": landed, "commit": sha, "spawned": spawned})
@@ -159,7 +167,8 @@ class Orchestrator:
                 # its lease expired and another attempt took over. The board is left to the owner.
                 self.board.log(item.id, "done_without_lease", {**vd, "landed": landed, "commit": sha})
                 self.log(f"[{item.id}] ✓ verified · landed {len(landed)} file(s) · lease was lost, board left to the newer attempt")
-            self.ws.cleanup(key, path)
+            with self._workspace_lock:
+                self.ws.cleanup(key, path)
             return
 
         nxt = self._model_for(kind, item.attempts + 1)
@@ -173,10 +182,12 @@ class Orchestrator:
             self.board.set_meta(item.id, parked_workdir=str(path))
         elif status == "lost":
             self.log(f"[{item.id}] ✕ rejected, and the lease was lost meanwhile — nothing recorded")
-            self.ws.cleanup(key, path)
+            with self._workspace_lock:
+                self.ws.cleanup(key, path)
         else:
             self.log(f"[{item.id}] ✕ rejected ({verdict.detail.splitlines()[-1][:80] if verdict.detail else 'no detail'}) — will retry with escalation")
-            self.ws.cleanup(key, path)
+            with self._workspace_lock:
+                self.ws.cleanup(key, path)
 
     # ---------------- the loop ----------------
     def run(self, forever: bool = False, max_items: Optional[int] = None, poll_s: float = 3.0):

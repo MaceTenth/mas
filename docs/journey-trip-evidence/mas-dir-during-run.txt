@@ -1,0 +1,9 @@
+total 824
+drwxr-xr-x@ 8 shimonmoyal  staff     256 Sep  8 17:15 .
+drwxr-xr-x@ 6 shimonmoyal  staff     192 Sep  8 17:05 ..
+-rw-r--r--@ 1 shimonmoyal  staff   45056 Sep  8 17:14 board.db
+-rw-r--r--@ 1 shimonmoyal  staff   32768 Sep  8 17:15 board.db-shm
+-rw-r--r--@ 1 shimonmoyal  staff  317272 Sep  8 17:15 board.db-wal
+-rw-r--r--@ 1 shimonmoyal  staff     972 Sep  8 17:05 config.json
+-rw-r--r--@ 1 shimonmoyal  staff   11638 Sep  8 17:14 last_plan.json
+drwxr-xr-x@ 6 shimonmoyal  staff     192 Sep  8 17:15 work
